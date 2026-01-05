@@ -21,6 +21,16 @@ The Rust version must:
 
 When in doubt, **match Python behavior exactly**.
 
+Use this Rust implementation of Reticulum (RNS):
+
+```toml
+[dependencies.reticulum]
+git = "https://github.com/doubleailes/Reticulum-rs"
+branch = "LXMF"
+```
+
+Comment the missing features or deviations from Python RNS as needed.
+
 ---
 
 ## 2. Reference Implementation
