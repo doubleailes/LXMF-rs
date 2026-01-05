@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+[dependencies.reticulum]
+git = "https://github.com/doubleailes/Reticulum-rs"
+branch = "LXMF"
