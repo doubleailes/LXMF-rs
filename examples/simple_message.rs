@@ -28,10 +28,7 @@ fn main() {
     );
 
     println!("Title: {}", message.title_as_string().unwrap());
-    println!(
-        "Content: {}",
-        message.content_as_string().unwrap()
-    );
+    println!("Content: {}", message.content_as_string().unwrap());
 
     // Pack and sign the message
     println!("\nPacking and signing message...");
@@ -69,10 +66,7 @@ fn main() {
         "  Content: {}",
         received_message.content_as_string().unwrap()
     );
-    println!(
-        "  Timestamp: {}",
-        received_message.timestamp
-    );
+    println!("  Timestamp: {}", received_message.timestamp);
 
     // Example with custom fields
     println!("\n\nCreating a message with custom fields...");
@@ -104,7 +98,10 @@ fn main() {
         .expect("Failed to verify signature");
 
     println!("Signature valid: {}", is_valid_2);
-    println!("Number of custom fields: {}", received_with_fields.fields.len());
+    println!(
+        "Number of custom fields: {}",
+        received_with_fields.fields.len()
+    );
 
     if let Some(debug_data) = received_with_fields.fields.get(&FIELD_DEBUG) {
         println!(

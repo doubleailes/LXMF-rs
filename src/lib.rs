@@ -17,7 +17,7 @@
 //!   - Timestamp (f64, UNIX epoch seconds)
 //!   - Title (bytes, optional but must be present)
 //!   - Content (bytes, optional but must be present)
-//!   - Fields (HashMap<u8, Vec<u8>>, optional but must be present)
+//!   - Fields (HashMap with u8 keys and Vec\<u8\> values, optional but must be present)
 //!
 //! ## Example
 //!
@@ -61,4 +61,7 @@ pub mod message;
 // Re-export commonly used types
 pub use constants::*;
 pub use error::{LxmfError, Result};
-pub use message::{DeliveryMethod, LxMessage, MessageState, DESTINATION_LENGTH, SIGNATURE_LENGTH};
+pub use message::{
+    DeliveryMethod, LxMessage, MessageState, DESTINATION_LENGTH, LXMF_OVERHEAD, SIGNATURE_LENGTH,
+    STRUCT_OVERHEAD, TIMESTAMP_SIZE,
+};

@@ -12,20 +12,15 @@ fn test_empty_message() {
     let destination_hash = [0xAAu8; DESTINATION_LENGTH];
     let source_hash = [0xBBu8; DESTINATION_LENGTH];
 
-    let mut message = LxMessage::new(
-        destination_hash,
-        source_hash,
-        vec![],
-        vec![],
-        None,
-    );
+    let mut message = LxMessage::new(destination_hash, source_hash, vec![], vec![], None);
 
     let packed = message.pack(&signing_key).expect("Failed to pack message");
-    let mut unpacked =
-        LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
+    let mut unpacked = LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
 
     assert!(
-        unpacked.verify_signature(&verifying_key).expect("Failed to verify"),
+        unpacked
+            .verify_signature(&verifying_key)
+            .expect("Failed to verify"),
         "Signature verification failed"
     );
     assert_eq!(unpacked.content, vec![]);
@@ -54,11 +49,12 @@ fn test_message_with_unicode() {
     );
 
     let packed = message.pack(&signing_key).expect("Failed to pack message");
-    let mut unpacked =
-        LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
+    let mut unpacked = LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
 
     assert!(
-        unpacked.verify_signature(&verifying_key).expect("Failed to verify"),
+        unpacked
+            .verify_signature(&verifying_key)
+            .expect("Failed to verify"),
         "Signature verification failed"
     );
     assert_eq!(unpacked.content_as_string().unwrap(), content);
@@ -88,11 +84,12 @@ fn test_message_with_multiple_fields() {
     );
 
     let packed = message.pack(&signing_key).expect("Failed to pack message");
-    let mut unpacked =
-        LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
+    let mut unpacked = LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
 
     assert!(
-        unpacked.verify_signature(&verifying_key).expect("Failed to verify"),
+        unpacked
+            .verify_signature(&verifying_key)
+            .expect("Failed to verify"),
         "Signature verification failed"
     );
     assert_eq!(unpacked.fields.len(), 3);
@@ -123,11 +120,12 @@ fn test_large_message() {
     );
 
     let packed = message.pack(&signing_key).expect("Failed to pack message");
-    let mut unpacked =
-        LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
+    let mut unpacked = LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
 
     assert!(
-        unpacked.verify_signature(&verifying_key).expect("Failed to verify"),
+        unpacked
+            .verify_signature(&verifying_key)
+            .expect("Failed to verify"),
         "Signature verification failed"
     );
     assert_eq!(unpacked.content, large_content);
@@ -197,8 +195,7 @@ fn test_invalid_signature_detection() {
     let packed = message.pack(&signing_key1).expect("Failed to pack message");
 
     // Try to verify with key2 (should fail)
-    let mut unpacked =
-        LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
+    let mut unpacked = LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
 
     let is_valid = unpacked
         .verify_signature(&verifying_key2)

@@ -20,7 +20,8 @@ pub const STRUCT_OVERHEAD: usize = 8;
 
 /// Total LXMF overhead per message
 /// 16 bytes destination + 16 bytes source + 64 bytes signature + 8 bytes timestamp + 8 bytes msgpack structure
-pub const LXMF_OVERHEAD: usize = 2 * DESTINATION_LENGTH + SIGNATURE_LENGTH + TIMESTAMP_SIZE + STRUCT_OVERHEAD;
+pub const LXMF_OVERHEAD: usize =
+    2 * DESTINATION_LENGTH + SIGNATURE_LENGTH + TIMESTAMP_SIZE + STRUCT_OVERHEAD;
 
 /// Message delivery methods
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,21 +196,20 @@ impl LxMessage {
     pub fn unpack_from_bytes(data: &[u8]) -> Result<Self> {
         // Verify minimum length
         if data.len() < 2 * DESTINATION_LENGTH + SIGNATURE_LENGTH {
-            return Err(LxmfError::InvalidMessage(
-                "Message too short".to_string(),
-            ));
+            return Err(LxmfError::InvalidMessage("Message too short".to_string()));
         }
 
         // Extract components
         let destination_hash: [u8; DESTINATION_LENGTH] =
             data[0..DESTINATION_LENGTH].try_into().unwrap();
-        let source_hash: [u8; DESTINATION_LENGTH] = data[DESTINATION_LENGTH..2 * DESTINATION_LENGTH]
+        let source_hash: [u8; DESTINATION_LENGTH] = data
+            [DESTINATION_LENGTH..2 * DESTINATION_LENGTH]
             .try_into()
             .unwrap();
-        let signature: [u8; SIGNATURE_LENGTH] =
-            data[2 * DESTINATION_LENGTH..2 * DESTINATION_LENGTH + SIGNATURE_LENGTH]
-                .try_into()
-                .unwrap();
+        let signature: [u8; SIGNATURE_LENGTH] = data
+            [2 * DESTINATION_LENGTH..2 * DESTINATION_LENGTH + SIGNATURE_LENGTH]
+            .try_into()
+            .unwrap();
         let packed_payload = &data[2 * DESTINATION_LENGTH + SIGNATURE_LENGTH..];
 
         // Deserialize the payload
@@ -339,8 +339,7 @@ mod tests {
         let packed = message.pack(&signing_key).expect("Failed to pack message");
 
         // Unpack the message
-        let mut unpacked =
-            LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
+        let mut unpacked = LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
 
         // Verify signature
         let valid = unpacked
@@ -376,8 +375,7 @@ mod tests {
         );
 
         let packed = message.pack(&signing_key).expect("Failed to pack message");
-        let mut unpacked =
-            LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
+        let mut unpacked = LxMessage::unpack_from_bytes(&packed).expect("Failed to unpack message");
 
         let valid = unpacked
             .verify_signature(&verifying_key)
