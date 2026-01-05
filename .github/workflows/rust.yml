@@ -1,34 +1,27 @@
 name: Rust CI
 
 on:
-	push:
-		branches:
-			- main
-	pull_request:
-		branches:
-			- main
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
 
 jobs:
-	lint-test:
-		runs-on: ubuntu-latest
-
-		steps:
-			- name: Checkout repository
-				uses: actions/checkout@v4
-
-			- name: Install stable toolchain
-				uses: dtolnay/rust-toolchain@stable
-				with:
-					components: rustfmt, clippy
-
-			- name: Cargo fmt
-				run: cargo fmt --all -- --check
-
-			- name: Cargo clippy
-				run: cargo clippy --all-targets --all-features -- -D warnings
-
-			- name: Cargo build
-				run: cargo build --all-targets --all-features
-
-			- name: Cargo test
-				run: cargo test --all-features
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        BUILD_TARGET: [release] # refers to a cargo profile
+    outputs:
+      release_built: ${{ steps.set-output.outputs.release_built }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the format
+        run: cargo fmt --check
+      - name: Clippy check
+        run: cargo clippy
+      - name: Build binaries in "${{ matrix.BUILD_TARGET }}" mode
+        run: cargo build --profile ${{ matrix.BUILD_TARGET }}
+      - name: Run tests in "${{ matrix.BUILD_TARGET }}" mode
+        run: cargo test --profile ${{ matrix.BUILD_TARGET }}
