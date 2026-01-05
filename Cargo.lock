@@ -7,6 +7,7 @@ name = "LXMF-rs"
 version = "0.1.0"
 dependencies = [
  "reticulum",
+ "serde",
 ]
 
 [[package]]
