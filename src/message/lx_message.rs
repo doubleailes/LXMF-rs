@@ -428,4 +428,112 @@ mod tests {
         let result = LXMessage::unpack(&short_data);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_wire_format_structure() {
+        // This test verifies the wire format matches Python LXMF specification
+        let dest = [0xAA; DESTINATION_LENGTH];
+        let src = [0xBB; DESTINATION_LENGTH];
+        let mut payload = LxPayload::new(1234567890.5);
+        payload.set_title_from_string("Subject");
+        payload.set_content_from_string("Message body");
+        
+        let mut msg = LXMessage::new(dest, src, payload);
+        
+        let signing_key = SigningKey::from_bytes(&[0xCC; 32]);
+        msg.sign(&signing_key).unwrap();
+        
+        let packed = msg.pack().unwrap();
+        
+        // Verify wire format structure:
+        // First 16 bytes: destination hash
+        assert_eq!(&packed[0..16], &dest);
+        
+        // Next 16 bytes: source hash
+        assert_eq!(&packed[16..32], &src);
+        
+        // Next 64 bytes: signature
+        assert_eq!(&packed[32..96], &msg.signature);
+        
+        // Remaining bytes: msgpack payload
+        // The payload should be decodable as [timestamp, title, content, fields]
+        let payload_bytes = &packed[96..];
+        let decoded: (f64, Vec<u8>, Vec<u8>, std::collections::HashMap<String, Vec<u8>>) =
+            rmp_serde::from_slice(payload_bytes).unwrap();
+        
+        assert_eq!(decoded.0, 1234567890.5);
+        assert_eq!(decoded.1, b"Subject");
+        assert_eq!(decoded.2, b"Message body");
+        assert!(decoded.3.is_empty());
+    }
+
+    #[test]
+    fn test_message_id_determinism() {
+        // Message ID should be deterministic for same inputs
+        let dest = [0x11; DESTINATION_LENGTH];
+        let src = [0x22; DESTINATION_LENGTH];
+        let mut payload1 = LxPayload::new(1234567890.0);
+        payload1.set_content_from_string("Test");
+        
+        let mut msg1 = LXMessage::new(dest, src, payload1.clone());
+        let mut msg2 = LXMessage::new(dest, src, payload1);
+        
+        let id1 = msg1.message_id().unwrap();
+        let id2 = msg2.message_id().unwrap();
+        
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_empty_payload_fields() {
+        // Test with all optional fields empty (as per Python behavior)
+        let dest = [0xFF; DESTINATION_LENGTH];
+        let src = [0xEE; DESTINATION_LENGTH];
+        let payload = LxPayload::new(9999999.0);
+        
+        let mut msg = LXMessage::new(dest, src, payload);
+        
+        let signing_key = SigningKey::from_bytes(&[0x77; 32]);
+        msg.sign(&signing_key).unwrap();
+        
+        // Pack and unpack
+        let packed = msg.pack().unwrap();
+        let mut unpacked = LXMessage::unpack(&packed).unwrap();
+        
+        // Verify empty fields are preserved
+        assert!(unpacked.payload.title.is_empty());
+        assert!(unpacked.payload.content.is_empty());
+        assert!(unpacked.payload.fields.is_empty());
+        
+        // Signature should still be valid
+        let verifying_key = signing_key.verifying_key();
+        assert!(unpacked.verify(&verifying_key).unwrap());
+    }
+
+    #[test]
+    fn test_message_with_fields() {
+        // Test with complex fields structure
+        let dest = [0x33; DESTINATION_LENGTH];
+        let src = [0x44; DESTINATION_LENGTH];
+        let mut payload = LxPayload::new(1111111.0);
+        payload.set_content_from_string("Message with attachments");
+        payload.set_field("attachment1".to_string(), b"file data 1".to_vec());
+        payload.set_field("attachment2".to_string(), b"file data 2".to_vec());
+        payload.set_field("metadata".to_string(), b"some metadata".to_vec());
+        
+        let mut msg = LXMessage::new(dest, src, payload.clone());
+        
+        let signing_key = SigningKey::from_bytes(&[0x55; 32]);
+        msg.sign(&signing_key).unwrap();
+        
+        // Pack and unpack
+        let packed = msg.pack().unwrap();
+        let unpacked = LXMessage::unpack(&packed).unwrap();
+        
+        // Verify fields are preserved
+        assert_eq!(unpacked.payload.fields.len(), 3);
+        assert_eq!(unpacked.payload.get_field("attachment1"), Some(&b"file data 1".to_vec()));
+        assert_eq!(unpacked.payload.get_field("attachment2"), Some(&b"file data 2".to_vec()));
+        assert_eq!(unpacked.payload.get_field("metadata"), Some(&b"some metadata".to_vec()));
+    }
 }
