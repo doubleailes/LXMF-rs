@@ -22,10 +22,7 @@ use reticulum::{
     // transport::Transport,  // TODO: integrate once you decide how LXMF-rs drives Reticulum-rs
 };
 
-use crate::{
-    // message::{LxMessage, LxMessageId, LxTransientId}, // TODO: align with your LXMessage/LXPayload types
-    // peer::LxmPeer,
-};
+use crate::{router::error::RouterError};
 
 pub const APP_NAME: &str = "lxmf";
 
@@ -36,21 +33,7 @@ fn unix_time_s() -> u64 {
         .as_secs()
 }
 
-/// Router-level errors.
-#[derive(Debug)]
-pub enum RouterError {
-    MissingStoragePath,
 
-    InvalidDestinationHashLen { expected: usize, got: usize },
-
-    Io(std::io::Error),
-}
-
-impl From<std::io::Error> for RouterError {
-    fn from(err: std::io::Error) -> Self {
-        RouterError::Io(err)
-    }
-}
 
 /// Propagation transfer states (mirrors Python constants PR_*).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

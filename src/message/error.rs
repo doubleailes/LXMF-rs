@@ -1,8 +1,7 @@
-use std::error::Error;
 use std::fmt;
 
 #[derive(Debug)]
-pub enum LXMessageError {
+pub enum MessageError {
     /// Serialization error
     SerializationError(String),
     /// Deserialization error
@@ -15,16 +14,14 @@ pub enum LXMessageError {
     SigningError(String),
 }
 
-impl fmt::Display for LXMessageError {
+impl fmt::Display for MessageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LXMessageError::SerializationError(e) => write!(f, "Serialization error: {}", e),
-            LXMessageError::DeserializationError(e) => write!(f, "Deserialization error: {}", e),
-            LXMessageError::InvalidSignature => write!(f, "Invalid signature"),
-            LXMessageError::InvalidFormat(e) => write!(f, "Invalid format: {}", e),
-            LXMessageError::SigningError(e) => write!(f, "Signing error: {}", e),
+            MessageError::SerializationError(e) => write!(f, "Serialization error: {}", e),
+            MessageError::DeserializationError(e) => write!(f, "Deserialization error: {}", e),
+            MessageError::InvalidSignature => write!(f, "Invalid signature"),
+            MessageError::InvalidFormat(e) => write!(f, "Invalid format: {}", e),
+            MessageError::SigningError(e) => write!(f, "Signing error: {}", e),
         }
     }
 }
-
-impl Error for LXMessageError {}
