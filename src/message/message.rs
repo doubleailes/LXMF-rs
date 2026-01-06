@@ -25,6 +25,7 @@ const QR_ERROR_CORRECTION: &str = "ERROR_CORRECT_L";
 const QR_MAX_STORAGE: usize = 2953;
 const PAPER_MDU: usize = ((QR_MAX_STORAGE-(URI_SCHEMA.len()+ "://".len()))*6)/8;
 
+#[allow(non_snake_case)]
 pub struct LXMessage {
     /// Destination hash (16 bytes)
     destination: SingleOutputDestination,
