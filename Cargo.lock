@@ -7,9 +7,13 @@ name = "LXMF-rs"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "env_logger",
  "indexmap",
+ "log",
+ "rand_core",
  "reticulum",
  "rmp",
+ "rmp-serde",
  "serde",
  "tokio",
 ]
