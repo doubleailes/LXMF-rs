@@ -1,4 +1,4 @@
 mod router;
-pub use router::{RouterConfig, LxmRouter};
+pub use router::{LxmRouter, RouterConfig};
 mod error;
 pub use error::RouterError;

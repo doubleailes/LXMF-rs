@@ -1,5 +1,5 @@
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Payload structure for LXMF messages.
 ///
@@ -22,7 +22,7 @@ pub struct LxPayload {
     pub content: Vec<u8>,
 
     /// Additional structured data (attachments, metadata, etc.)
-    pub fields: HashMap<String, Vec<u8>>,
+    pub fields: IndexMap<String, Vec<u8>>,
 }
 
 impl LxPayload {
@@ -32,7 +32,7 @@ impl LxPayload {
             timestamp,
             title: title.into_bytes(),
             content: content.into_bytes(),
-            fields: HashMap::new(),
+            fields: IndexMap::new(),
         }
     }
     pub fn new_now(title: String, content: String) -> Self {
@@ -44,7 +44,22 @@ impl LxPayload {
             timestamp,
             title: title.into_bytes(),
             content: content.into_bytes(),
-            fields: HashMap::new(),
+            fields: IndexMap::new(),
+        }
+    }
+
+    /// Construct a payload from fully specified components.
+    pub fn from_parts(
+        timestamp: f64,
+        title: Vec<u8>,
+        content: Vec<u8>,
+        fields: IndexMap<String, Vec<u8>>,
+    ) -> Self {
+        Self {
+            timestamp,
+            title,
+            content,
+            fields,
         }
     }
 

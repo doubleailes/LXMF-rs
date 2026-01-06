@@ -1,6 +1,6 @@
-use crate::router::RouterError;
 use crate::message::MessageError;
-pub enum LXMError{
+use crate::router::RouterError;
+pub enum LXMError {
     RouterError,
     MessageError,
 }

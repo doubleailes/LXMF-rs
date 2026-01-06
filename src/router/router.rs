@@ -22,7 +22,7 @@ use reticulum::{
     // transport::Transport,  // TODO: integrate once you decide how LXMF-rs drives Reticulum-rs
 };
 
-use crate::{router::error::RouterError};
+use crate::router::error::RouterError;
 
 pub const APP_NAME: &str = "lxmf";
 
@@ -32,8 +32,6 @@ fn unix_time_s() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
-
-
 
 /// Propagation transfer states (mirrors Python constants PR_*).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -230,7 +228,10 @@ impl LxmRouter {
     pub const MESSAGE_EXPIRY_S: u64 = 30 * 24 * 60 * 60;
     pub const STAMP_COST_EXPIRY_S: u64 = 45 * 24 * 60 * 60;
 
-    pub fn new(identity: Option<PrivateIdentity>, cfg: RouterConfig) -> Result<Arc<Self>, RouterError> {
+    pub fn new(
+        identity: Option<PrivateIdentity>,
+        cfg: RouterConfig,
+    ) -> Result<Arc<Self>, RouterError> {
         if cfg.storage_root.as_os_str().is_empty() {
             return Err(RouterError::MissingStoragePath);
         }
