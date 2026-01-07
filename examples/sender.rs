@@ -63,10 +63,11 @@ async fn main() {
         log::error!("Failed to attach transport to router: {}", err);
         return;
     }
-    let _client_addr = transport.iface_manager().lock().await.spawn(
-        TcpClient::new("127.0.0.1:4242"),
-        TcpClient::spawn,
-    );
+    let client_addr = transport
+        .iface_manager()
+        .lock()
+        .await
+        .spawn(TcpClient::new("127.0.0.1:4242"), TcpClient::spawn);
     log::info!("Creating and sending LXMessage...");
     loop {
         if transport.has_path(&destination_hash).await {
@@ -86,10 +87,13 @@ async fn main() {
                 destination_identity,
                 DestinationName::new(APP_NAME, DELIVERY_ASPECT),
             );
-            let source_destination = SingleInputDestination::new(
+            let mut source_destination = SingleInputDestination::new(
                 private_identity.clone(),
                 DestinationName::new(APP_NAME, DELIVERY_ASPECT),
             );
+            transport
+                .send_direct(client_addr, source_destination.announce(OsRng, None).unwrap())
+                .await;
             let message = LXMessage::new(
                 destination,
                 source_destination,
