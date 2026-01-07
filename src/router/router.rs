@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 
 use crate::{
-    LXMessage, LxmPeer, SyncStrategy,
+    LXMessage, LxmPeer, SyncStrategy, ValidMethod,
     message::{
         MessageError,
         message::State,
@@ -133,6 +133,112 @@ pub fn display_name_from_app_data(app_data: &[u8]) -> Option<String> {
     } else {
         // Legacy format: raw UTF-8 display name
         String::from_utf8(app_data.to_vec()).ok()
+    }
+}
+
+/// LXMF Delivery Announce Handler
+///
+/// Handles incoming announces for the "lxmf.delivery" aspect.
+/// When an announce is received, it:
+/// 1. Extracts the stamp_cost from the app_data and caches it
+/// 2. Triggers immediate delivery attempts for matching pending outbound messages
+///
+/// References Python LXMF/LXMF.py class LXMFDeliveryAnnounceHandler
+pub struct LXMFDeliveryAnnounceHandler {
+    /// The aspect filter for this handler: "lxmf.delivery"
+    pub aspect_filter: String,
+    /// Whether to receive path responses (always true for LXMF delivery)
+    pub receive_path_responses: bool,
+    /// Reference to the LXMF router
+    lxmrouter: LxmRouter,
+}
+
+impl LXMFDeliveryAnnounceHandler {
+    /// Create a new delivery announce handler for the given router.
+    pub fn new(lxmrouter: LxmRouter) -> Self {
+        Self {
+            aspect_filter: format!("{}.{}", APP_NAME, DELIVERY_ASPECT),
+            receive_path_responses: true,
+            lxmrouter,
+        }
+    }
+
+    /// Handle a received announce.
+    ///
+    /// This method should be called when an announce is received for a destination
+    /// matching the aspect filter. It will:
+    /// 1. Extract and cache the stamp_cost from the announce app_data
+    /// 2. Trigger immediate delivery for any pending outbound messages to this destination
+    ///
+    /// # Arguments
+    /// * `destination_hash` - The hash of the announcing destination
+    /// * `app_data` - The application data from the announce (contains display_name and stamp_cost)
+    ///
+    /// References Python LXMF/LXMF.py LXMFDeliveryAnnounceHandler.received_announce()
+    pub fn received_announce(&self, destination_hash: AddressHash, app_data: &[u8]) {
+        // Extract and cache stamp_cost from app_data
+        match std::panic::catch_unwind(|| stamp_cost_from_app_data(app_data)) {
+            Ok(stamp_cost_opt) => {
+                if let Some(stamp_cost) = stamp_cost_opt {
+                    if let Err(e) = self.lxmrouter.update_outbound_stamp_cost(destination_hash, stamp_cost) {
+                        error!(
+                            "Failed to update stamp cost for {}: {}",
+                            hex::encode(destination_hash.as_slice()),
+                            e
+                        );
+                    } else {
+                        trace!(
+                            "Updated stamp cost {} for {} from announce",
+                            stamp_cost,
+                            hex::encode(destination_hash.as_slice())
+                        );
+                    }
+                }
+            }
+            Err(_) => {
+                error!(
+                    "An error occurred while trying to decode announced stamp cost for {}",
+                    hex::encode(destination_hash.as_slice())
+                );
+            }
+        }
+
+        // Check pending outbound messages and trigger delivery for matching destinations
+        // with DIRECT or OPPORTUNISTIC methods
+        self.trigger_outbound_for_destination(destination_hash);
+    }
+
+    /// Trigger immediate delivery attempts for pending outbound messages to the given destination.
+    ///
+    /// Only triggers for messages with DIRECT or OPPORTUNISTIC delivery methods.
+    fn trigger_outbound_for_destination(&self, destination_hash: AddressHash) {
+        let should_trigger = {
+            let pending = self.lxmrouter.inner.pending_outbound.lock().unwrap();
+            pending.iter().any(|msg| {
+                msg.destination_hash() == destination_hash
+                    && (msg.method() == ValidMethod::Direct
+                        || msg.method() == ValidMethod::Opportunistic)
+            })
+        };
+
+        if should_trigger {
+            trace!(
+                "Announce received for {}, triggering outbound processing",
+                hex::encode(destination_hash.as_slice())
+            );
+            // Trigger outbound processing in a separate thread to avoid blocking
+            let router = self.lxmrouter.clone();
+            thread::spawn(move || {
+                // Small delay to ensure any processing locks are released
+                thread::sleep(Duration::from_millis(100));
+                router.process_outbound();
+            });
+        }
+    }
+
+    /// Get a reference to the underlying router.
+    pub fn router(&self) -> &LxmRouter {
+        &self.lxmrouter
     }
 }
 
