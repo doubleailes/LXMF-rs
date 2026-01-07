@@ -209,9 +209,7 @@ impl LXMessage {
     pub fn pack(&mut self) -> Result<&[u8], MessageError> {
         if self.packed.is_some() {
             let slice = self
-                .packed
-                .as_ref()
-                .map(|buf| buf.as_slice())
+                .packed.as_deref()
                 .expect("packed present");
             return Ok(slice);
         }
@@ -514,11 +512,10 @@ impl LXMessage {
                 .map_err(|e| MessageError::SerializationError(e.to_string()))?;
             write_bin(&mut buf, value)?;
         }
-        if include_stamp_entry {
-            if let Some(stamp) = &self.stamp {
+        if include_stamp_entry
+            && let Some(stamp) = &self.stamp {
                 write_bin(&mut buf, stamp)?;
             }
-        }
         Ok(buf)
     }
 
@@ -733,18 +730,15 @@ enum Representation {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
+#[derive(Default)]
 pub enum ValidMethod {
     Opportunistic = 0x01,
+    #[default]
     Direct = 0x02,
     Propagated = 0x03,
     Paper = 0x05,
 }
 
-impl Default for ValidMethod {
-    fn default() -> Self {
-        ValidMethod::Direct
-    }
-}
 
 impl TryFrom<u8> for ValidMethod {
     type Error = MessageError;
