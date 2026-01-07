@@ -1,4 +1,4 @@
-use LXMF_rs::{stamp_cost_from_app_data, LXMessage, LxmRouter, RouterConfig, ValidMethod};
+use LXMF_rs::{LXMFDeliveryAnnounceHandler, LXMessage, LxmRouter, RouterConfig, ValidMethod};
 use rand_core::OsRng;
 use reticulum::destination::{DestinationName, SingleInputDestination, SingleOutputDestination};
 use reticulum::hash::AddressHash;
@@ -75,40 +75,33 @@ async fn main() {
     // Subscribe to announces to receive stamp_cost discovery
     let mut announce_rx = transport.recv_announces().await;
 
+    // Create the LXMF delivery announce handler
+    // This automatically extracts stamp_cost from announces and caches them in the router
+    let announce_handler = LXMFDeliveryAnnounceHandler::new(router.clone());
+    log::info!(
+        "Registered announce handler with aspect filter: {}",
+        announce_handler.aspect_filter
+    );
+
     log::info!("Creating and sending LXMessage...");
     log::info!("Waiting for destination announce to discover stamp cost...");
 
-    // Track discovered stamp cost from announces
-    let mut discovered_stamp_cost: Option<u8> = None;
-
     loop {
         // Check for incoming announces to discover stamp_cost
-        // This implements Python LXMF's LXMFDeliveryAnnounceHandler behavior
+        // The LXMFDeliveryAnnounceHandler handles stamp cost extraction and caching
         while let Ok(announce_event) = announce_rx.try_recv() {
             let dest = announce_event.destination.lock().await;
             let announce_dest_hash = dest.desc.address_hash;
 
-            if announce_dest_hash == destination_hash {
-                // Extract stamp_cost from the announce app_data
-                let app_data = announce_event.app_data.as_slice();
-                if let Some(cost) = stamp_cost_from_app_data(app_data) {
-                    log::info!(
-                        "Discovered stamp cost {} from announce for {}",
-                        cost,
-                        destination_hash
-                    );
-                    discovered_stamp_cost = Some(cost);
+            // Let the handler process the announce (extracts stamp_cost, triggers outbound)
+            let app_data = announce_event.app_data.as_slice();
+            announce_handler.received_announce(announce_dest_hash, app_data);
 
-                    // Update the router's cached stamp cost for this destination
-                    if let Err(err) = router.update_outbound_stamp_cost(destination_hash, cost) {
-                        log::warn!("Failed to update cached stamp cost: {}", err);
-                    }
-                } else {
-                    log::debug!(
-                        "Announce from {} has no stamp cost requirement",
-                        destination_hash
-                    );
-                }
+            if announce_dest_hash == destination_hash {
+                log::info!(
+                    "Received announce from target destination {}",
+                    destination_hash
+                );
             }
         }
 
@@ -145,13 +138,12 @@ async fn main() {
                 "Hello, this is the content of the message.".to_string(),
                 "Greetings".to_string(),
                 None,
-                Some(ValidMethod::Opportunistic),
+                Some(ValidMethod::Direct),
                 true,
             );
 
-            // Use discovered stamp cost from announce, or check router's cache
-            let stamp_cost = discovered_stamp_cost
-                .or_else(|| router.get_outbound_stamp_cost(destination_hash));
+            // Use stamp cost from router's cache (populated by announce handler)
+            let stamp_cost = router.get_outbound_stamp_cost(destination_hash);
 
             if let Some(cost) = stamp_cost {
                 log::info!("Using stamp cost {} (from announce discovery)", cost);
