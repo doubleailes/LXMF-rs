@@ -19,7 +19,9 @@ pub const TRANSIENT_ID_LEN: usize = 32;
 pub type TransientId = [u8; TRANSIENT_ID_LEN];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum PeerState {
+    #[default]
     Idle = 0x00,
     LinkEstablishing = 0x01,
     LinkReady = 0x02,
@@ -28,11 +30,6 @@ pub enum PeerState {
     ResourceTransferring = 0x05,
 }
 
-impl Default for PeerState {
-    fn default() -> Self {
-        PeerState::Idle
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerErrorCode {
@@ -455,9 +452,7 @@ impl LxmPeer {
     }
 
     pub fn currently_transferring(&self) -> Option<&[TransientId]> {
-        self.currently_transferring_messages
-            .as_ref()
-            .map(|ids| ids.as_slice())
+        self.currently_transferring_messages.as_deref()
     }
 
     pub fn set_currently_transferring(&mut self, ids: Option<Vec<TransientId>>) {

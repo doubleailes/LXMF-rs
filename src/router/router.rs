@@ -620,7 +620,7 @@ impl LxmRouter {
     ) -> Result<AddressHash, RouterError> {
         let identity = identity.unwrap_or_else(|| self.inner.identity.clone());
         let destination = SingleOutputDestination::new(
-            identity.as_identity().clone(),
+            *identity.as_identity(),
             DestinationName::new(APP_NAME, DELIVERY_ASPECT),
         );
         let dest_hash = destination.desc.address_hash;
@@ -693,7 +693,7 @@ impl LxmRouter {
         // Get the identity to create an input destination for announcing
         let input_destination = {
             let map = self.inner.delivery_destinations.lock().unwrap();
-            let dest = map.get(&destination_hash).ok_or_else(|| {
+            let dest = map.get(&destination_hash).ok_or({
                 RouterError::InvalidHashLength {
                     expected: ADDRESS_HASH_SIZE,
                     got: 0,
@@ -760,11 +760,10 @@ impl LxmRouter {
     ) -> Result<(), RouterError> {
         let mut map = self.inner.delivery_destinations.lock().unwrap();
         if let Some(dest) = map.get_mut(&destination_hash) {
-            if let Some(cost) = stamp_cost {
-                if cost == 0 || cost >= 255 {
+            if let Some(cost) = stamp_cost
+                && (cost == 0 || cost >= 255) {
                     return Err(RouterError::StampCostOutOfRange(cost as u32));
                 }
-            }
             dest.inbound_stamp_cost = stamp_cost;
             Ok(())
         } else {
@@ -980,21 +979,21 @@ impl LxmRouter {
     }
 
     fn run_jobs(&self, tick: u64) -> Result<(), RouterError> {
-        if tick % JOB_TRANSIENT_INTERVAL == 0 {
+        if tick.is_multiple_of(JOB_TRANSIENT_INTERVAL) {
             self.clean_transient_id_caches();
             self.clean_outbound_stamp_costs();
         }
 
-        if tick % JOB_PEERSYNC_INTERVAL == 0 {
+        if tick.is_multiple_of(JOB_PEERSYNC_INTERVAL) {
             self.clean_throttled_peers();
             self.clean_available_tickets();
         }
 
-        if tick % JOB_STORE_INTERVAL == 0 {
+        if tick.is_multiple_of(JOB_STORE_INTERVAL) {
             self.clean_message_store();
         }
 
-        if tick % JOB_OUTBOUND_INTERVAL == 0 {
+        if tick.is_multiple_of(JOB_OUTBOUND_INTERVAL) {
             self.process_outbound();
         }
 
@@ -1101,11 +1100,10 @@ impl LxmRouter {
         &self,
         message: &mut LXMessage,
     ) -> Result<(), OutboundPreparationError> {
-        if message.stamp_cost().is_none() {
-            if let Some(cost) = self.get_outbound_stamp_cost(message.destination_hash()) {
+        if message.stamp_cost().is_none()
+            && let Some(cost) = self.get_outbound_stamp_cost(message.destination_hash()) {
                 message.set_stamp_cost(Some(cost));
             }
-        }
 
         message.pack().map_err(OutboundPreparationError::Message)?;
 
@@ -1117,10 +1115,9 @@ impl LxmRouter {
             return Ok(());
         }
 
-        let message_id = message
+        let message_id = *message
             .message_hash()
-            .ok_or(OutboundPreparationError::MissingMessageId)?
-            .clone();
+            .ok_or(OutboundPreparationError::MissingMessageId)?;
 
         let mut rng = OsRng;
         let params = StampParameters::default();
@@ -1168,14 +1165,13 @@ impl LxmRouter {
 
         let entries = self.inner.propagation_entries.lock().unwrap();
         let total: u64 = entries.values().map(|entry| entry.size).sum();
-        if let Some(limit) = limit {
-            if total > limit {
+        if let Some(limit) = limit
+            && total > limit {
                 warn!(
                     "Message store exceeds limit ({} > {} bytes), culling not yet implemented",
                     total, limit
                 );
             }
-        }
     }
 
     fn clean_available_tickets(&self) {
@@ -1203,7 +1199,7 @@ impl LxmRouter {
         let mut peers = self.inner.peers.lock().unwrap();
         for peer in peers.values_mut() {
             for (transient_id, from_peer) in &entries {
-                if from_peer.map_or(true, |hash| hash != *peer.destination_hash()) {
+                if from_peer.is_none_or(|hash| hash != *peer.destination_hash()) {
                     peer.queue_unhandled_message(*transient_id);
                 }
             }

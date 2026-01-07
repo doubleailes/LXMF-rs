@@ -70,11 +70,10 @@ pub fn generate_stamp<R: RngCore + CryptoRng>(
             });
         }
 
-        if let Some(limit) = max_attempts {
-            if rounds >= limit {
+        if let Some(limit) = max_attempts
+            && rounds >= limit {
                 return Err(StampError::Exhausted(rounds));
             }
-        }
     }
 }
 
