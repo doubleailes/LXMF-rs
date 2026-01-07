@@ -64,7 +64,7 @@ async fn main() {
         return;
     }
     let _client_addr = transport.iface_manager().lock().await.spawn(
-        TcpClient::new("amsterdam.connect.reticulum.network:4965"),
+        TcpClient::new("127.0.0.1:4242"),
         TcpClient::spawn,
     );
     log::info!("Creating and sending LXMessage...");
