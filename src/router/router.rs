@@ -66,6 +66,76 @@ const TRANSIENT_ID_LEN: usize = 32;
 type TransientId = [u8; TRANSIENT_ID_LEN];
 type Timestamp = f64;
 
+/// Extract stamp_cost from LXMF delivery announce app_data.
+///
+/// Decodes Python LXMF 0.5.0+ format: msgpack array [display_name, stamp_cost]
+/// Returns None if app_data is empty, invalid, or uses the legacy format.
+///
+/// References Python LXMF/LXMF.py stamp_cost_from_app_data()
+pub fn stamp_cost_from_app_data(app_data: &[u8]) -> Option<u8> {
+    if app_data.is_empty() {
+        return None;
+    }
+
+    // Version 0.5.0+ announce format uses msgpack fixarray (0x90-0x9f) or array16 (0xdc)
+    let first_byte = app_data[0];
+    if !((0x90..=0x9f).contains(&first_byte) || first_byte == 0xdc) {
+        // Legacy format (raw display name string), no stamp cost
+        return None;
+    }
+
+    // Decode msgpack array using rmpv
+    let mut cursor = std::io::Cursor::new(app_data);
+    let peer_data = rmpv::decode::read_value(&mut cursor).ok()?;
+
+    if let rmpv::Value::Array(arr) = peer_data {
+        if arr.len() < 2 {
+            return None;
+        }
+        // slot 1 is stamp_cost
+        match &arr[1] {
+            rmpv::Value::Integer(n) => n.as_u64().and_then(|v| u8::try_from(v).ok()),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// Extract display_name from LXMF delivery announce app_data.
+///
+/// Decodes both Python LXMF 0.5.0+ format (msgpack array) and legacy format (raw string).
+///
+/// References Python LXMF/LXMF.py display_name_from_app_data()
+pub fn display_name_from_app_data(app_data: &[u8]) -> Option<String> {
+    if app_data.is_empty() {
+        return None;
+    }
+
+    let first_byte = app_data[0];
+    if (0x90..=0x9f).contains(&first_byte) || first_byte == 0xdc {
+        // Version 0.5.0+ announce format
+        let mut cursor = std::io::Cursor::new(app_data);
+        let peer_data = rmpv::decode::read_value(&mut cursor).ok()?;
+
+        if let rmpv::Value::Array(arr) = peer_data {
+            if arr.is_empty() {
+                return None;
+            }
+            match &arr[0] {
+                rmpv::Value::Binary(bytes) => String::from_utf8(bytes.clone()).ok(),
+                rmpv::Value::String(s) => Some(s.as_str()?.to_string()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        // Legacy format: raw UTF-8 display name
+        String::from_utf8(app_data.to_vec()).ok()
+    }
+}
+
 /// Router configuration mirrors the Python arguments.
 #[derive(Clone)]
 pub struct RouterConfig {
@@ -200,6 +270,7 @@ impl RouterPaths {
 }
 
 struct DeliveryDestination {
+    identity: PrivateIdentity,
     destination: SingleOutputDestination,
     display_name: Option<String>,
     inbound_stamp_cost: Option<u8>,
@@ -456,6 +527,7 @@ impl LxmRouter {
         map.insert(
             dest_hash,
             DeliveryDestination {
+                identity,
                 destination,
                 display_name,
                 inbound_stamp_cost: stamp_cost,
@@ -470,6 +542,76 @@ impl LxmRouter {
         F: Fn(&LXMessage) + Send + Sync + 'static,
     {
         *self.inner.delivery_callback.lock().unwrap() = Some(Arc::new(callback));
+    }
+
+    /// Build the announce app_data for a delivery destination.
+    ///
+    /// Format matches Python LXMF 0.5.0+: msgpack array [display_name, stamp_cost]
+    /// - slot 0: display_name as bytes (UTF-8) or None
+    /// - slot 1: stamp_cost as integer or None
+    pub fn get_announce_app_data(&self, destination_hash: AddressHash) -> Option<Vec<u8>> {
+        let map = self.inner.delivery_destinations.lock().unwrap();
+        let dest = map.get(&destination_hash)?;
+
+        let display_name: rmpv::Value = match &dest.display_name {
+            Some(name) => rmpv::Value::Binary(name.as_bytes().to_vec()),
+            None => rmpv::Value::Nil,
+        };
+
+        let stamp_cost: rmpv::Value = match dest.inbound_stamp_cost {
+            Some(cost) if cost > 0 && cost < 255 => {
+                rmpv::Value::Integer(rmpv::Integer::from(cost))
+            }
+            _ => rmpv::Value::Nil,
+        };
+
+        let peer_data = rmpv::Value::Array(vec![display_name, stamp_cost]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &peer_data).ok()?;
+        Some(buf)
+    }
+
+    /// Announce a registered delivery destination.
+    ///
+    /// This sends an announce via the attached Reticulum transport with app_data
+    /// containing the display_name and stamp_cost (msgpack encoded).
+    pub async fn announce(&self, destination_hash: AddressHash) -> Result<(), RouterError> {
+        let transport = self
+            .inner
+            .transport
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(RouterError::NoTransportAttached)?;
+
+        // Get the identity to create an input destination for announcing
+        let input_destination = {
+            let map = self.inner.delivery_destinations.lock().unwrap();
+            let dest = map.get(&destination_hash).ok_or_else(|| {
+                RouterError::InvalidHashLength {
+                    expected: ADDRESS_HASH_SIZE,
+                    got: 0,
+                }
+            })?;
+
+            // Create a SingleInputDestination from the stored identity
+            let input_dest = reticulum::destination::SingleInputDestination::new(
+                dest.identity.clone(),
+                DestinationName::new(APP_NAME, DELIVERY_ASPECT),
+            );
+            Arc::new(tokio::sync::Mutex::new(input_dest))
+        };
+
+        let app_data = self.get_announce_app_data(destination_hash);
+        transport
+            .send_announce(&input_destination, app_data.as_deref())
+            .await;
+
+        info!(
+            "Announced delivery destination {}",
+            hex::encode(destination_hash.as_slice())
+        );
+        Ok(())
     }
 
     /// Attach a Reticulum transport so queued LXMs can be forwarded automatically.

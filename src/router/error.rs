@@ -1,5 +1,7 @@
 use std::{error::Error, fmt};
 
+use reticulum::error::RnsError;
+
 /// Router-level errors.
 #[derive(Debug)]
 pub enum RouterError {
@@ -9,6 +11,8 @@ pub enum RouterError {
     InvalidHashLength { expected: usize, got: usize },
     RuntimeUnavailable(String),
     DispatchThreadPanicked,
+    NoTransportAttached,
+    Transport(RnsError),
     Io(std::io::Error),
     Serialization(String),
     Deserialization(String),
@@ -42,6 +46,10 @@ impl fmt::Display for RouterError {
             RouterError::DispatchThreadPanicked => {
                 write!(f, "Outbound dispatch thread panicked")
             }
+            RouterError::NoTransportAttached => {
+                write!(f, "No Reticulum transport attached to router")
+            }
+            RouterError::Transport(err) => write!(f, "Transport error: {}", err),
             RouterError::Io(err) => write!(f, "I/O error: {}", err),
             RouterError::Serialization(err) => write!(f, "Serialization error: {}", err),
             RouterError::Deserialization(err) => write!(f, "Deserialization error: {}", err),
