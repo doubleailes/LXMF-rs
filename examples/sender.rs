@@ -92,9 +92,12 @@ async fn main() {
                 DestinationName::new(APP_NAME, DELIVERY_ASPECT),
             );
             transport
-                .send_direct(client_addr, source_destination.announce(OsRng, None).unwrap())
+                .send_direct(
+                    client_addr,
+                    source_destination.announce(OsRng, None).unwrap(),
+                )
                 .await;
-            let message = LXMessage::new(
+            let mut message = LXMessage::new(
                 destination,
                 source_destination,
                 "Hello, this is the content of the message.".to_string(),
@@ -103,6 +106,8 @@ async fn main() {
                 Some(ValidMethod::Opportunistic),
                 true,
             );
+            // Set stamp cost to trigger stamp generation (cost 8 = 2^8 = 256 work iterations)
+            message.set_stamp_cost(Some(8));
 
             router.enqueue_outbound(message);
             log::info!(

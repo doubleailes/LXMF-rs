@@ -20,6 +20,7 @@ use std::{
 };
 
 use log::{error, info, trace, warn};
+use rand_core::OsRng;
 use reticulum::{
     destination::{DestinationName, SingleOutputDestination},
     error::RnsError,
@@ -31,7 +32,14 @@ use reticulum::{
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 
-use crate::{LXMessage, LxmPeer, SyncStrategy, message::message::State};
+use crate::{
+    LXMessage, LxmPeer, SyncStrategy,
+    message::{
+        MessageError,
+        message::State,
+        stamp::{StampError, StampParameters, generate_stamp},
+    },
+};
 
 use super::error::RouterError;
 
@@ -775,6 +783,18 @@ impl LxmRouter {
 
         for mut message in queue.drain(..) {
             let destination = message.destination_hash();
+            if let Err(err) = self.prepare_outbound_message(&mut message) {
+                warn!(
+                    "Failed to prepare LXMF message for {:?}: {}",
+                    destination, err
+                );
+                self.inner
+                    .failed_outbound
+                    .lock()
+                    .unwrap()
+                    .push_back(message);
+                continue;
+            }
             let payload = match message.transport_payload() {
                 Ok(bytes) => bytes,
                 Err(err) => {
@@ -827,6 +847,49 @@ impl LxmRouter {
             let mut pending = self.inner.pending_outbound.lock().unwrap();
             pending.extend(retry);
         }
+    }
+
+    fn prepare_outbound_message(
+        &self,
+        message: &mut LXMessage,
+    ) -> Result<(), OutboundPreparationError> {
+        if message.stamp_cost().is_none() {
+            if let Some(cost) = self.get_outbound_stamp_cost(message.destination_hash()) {
+                message.set_stamp_cost(Some(cost));
+            }
+        }
+
+        message.pack().map_err(OutboundPreparationError::Message)?;
+
+        let Some(cost) = message.stamp_cost() else {
+            return Ok(());
+        };
+
+        if cost == 0 || message.stamp().is_some() {
+            return Ok(());
+        }
+
+        let message_id = message
+            .message_hash()
+            .ok_or(OutboundPreparationError::MissingMessageId)?
+            .clone();
+
+        let mut rng = OsRng;
+        let params = StampParameters::default();
+        let stamp = generate_stamp(&mut rng, message_id.as_slice(), cost, params, None)
+            .map_err(OutboundPreparationError::Stamp)?;
+
+        message.set_stamp(Some(stamp.stamp.to_vec()));
+        message.set_stamp_value(Some(stamp.value));
+        trace!(
+            "Generated stamp (value {}) for {:?} after {} rounds",
+            stamp.value,
+            message.destination_hash(),
+            stamp.rounds
+        );
+
+        message.pack().map_err(OutboundPreparationError::Message)?;
+        Ok(())
     }
 
     async fn send_outbound_message(
@@ -1233,4 +1296,39 @@ fn load_ticket_cache(path: &Path) -> Result<TicketCache, RouterError> {
     }
     let persisted: PersistedTicketCache = rmp_serde::from_slice(&bytes)?;
     Ok(TicketCache::from_persisted(persisted))
+}
+
+#[derive(Debug)]
+enum OutboundPreparationError {
+    MissingMessageId,
+    Message(MessageError),
+    Stamp(StampError),
+}
+
+impl fmt::Display for OutboundPreparationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OutboundPreparationError::MissingMessageId => {
+                write!(f, "message hash not available during stamp generation")
+            }
+            OutboundPreparationError::Message(err) => {
+                write!(f, "message serialization failed: {}", err)
+            }
+            OutboundPreparationError::Stamp(err) => {
+                write!(f, "stamp generation failed: {}", err)
+            }
+        }
+    }
+}
+
+impl From<MessageError> for OutboundPreparationError {
+    fn from(err: MessageError) -> Self {
+        OutboundPreparationError::Message(err)
+    }
+}
+
+impl From<StampError> for OutboundPreparationError {
+    fn from(err: StampError) -> Self {
+        OutboundPreparationError::Stamp(err)
+    }
 }
