@@ -33,6 +33,8 @@ pub struct LXMessage {
     desired_method: Option<ValidMethod>,
     include_ticket: bool,
     stamp: Option<Vec<u8>>,
+    stamp_cost: Option<u8>,
+    stamp_value: Option<u16>,
     state: State,
     method: ValidMethod,
     representation: Representation,
@@ -76,6 +78,8 @@ impl LXMessage {
             desired_method,
             include_ticket,
             stamp: None,
+            stamp_cost: None,
+            stamp_value: None,
             state: State::Generating,
             method: desired_method.unwrap_or_default(),
             representation: Representation::Unknown,
@@ -143,8 +147,27 @@ impl LXMessage {
     }
 
     pub fn set_stamp(&mut self, stamp: Option<Vec<u8>>) {
+        if stamp.is_none() {
+            self.stamp_value = None;
+        }
         self.stamp = stamp;
         self.invalidate_cache();
+    }
+
+    pub fn stamp_cost(&self) -> Option<u8> {
+        self.stamp_cost
+    }
+
+    pub fn set_stamp_cost(&mut self, cost: Option<u8>) {
+        self.stamp_cost = cost;
+    }
+
+    pub fn stamp_value(&self) -> Option<u16> {
+        self.stamp_value
+    }
+
+    pub fn set_stamp_value(&mut self, value: Option<u16>) {
+        self.stamp_value = value;
     }
 
     pub fn destination_hash(&self) -> AddressHash {
@@ -153,6 +176,10 @@ impl LXMessage {
 
     pub fn source_hash(&self) -> AddressHash {
         self.source_hash
+    }
+
+    pub fn message_hash(&self) -> Option<&Hash> {
+        self.hash.as_ref()
     }
 
     pub fn method(&self) -> ValidMethod {
@@ -194,11 +221,8 @@ impl LXMessage {
             .ok_or(MessageError::MissingDestination)?;
         let source = self.source.as_ref().ok_or(MessageError::MissingSource)?;
 
-        self.payload.timestamp = unix_time_f64();
-
-        let payload_bytes = self.encode_payload_bytes()?;
-        let mut hashed_part =
-            hashed_part(&payload_bytes, &self.destination_hash, &self.source_hash);
+        let payload_core = self.encode_payload_bytes(false)?;
+        let mut hashed_part = hashed_part(&payload_core, &self.destination_hash, &self.source_hash);
         let message_hash = Hash::new_from_slice(&hashed_part);
         self.hash = Some(message_hash);
 
@@ -208,6 +232,11 @@ impl LXMessage {
         self.signature = Some(signature.to_bytes());
         self.signature_validated = true;
         self.unverified_reason = None;
+
+        let mut payload_bytes = payload_core;
+        if self.stamp.is_some() {
+            payload_bytes = self.encode_payload_bytes(true)?;
+        }
 
         let mut packed =
             Vec::with_capacity(DESTINATION_LENGTH * 2 + SIGNATURE_LENGTH + payload_bytes.len());
@@ -318,12 +347,29 @@ impl LXMessage {
         let decoded = Self::decode_payload_bytes(&payload_bytes)?;
         let payload = LxPayload::from_parts(
             decoded.timestamp,
-            decoded.title,
-            decoded.content,
-            decoded.fields,
+            decoded.title.clone(),
+            decoded.content.clone(),
+            decoded.fields.clone(),
         );
 
-        let mut hashed_part = hashed_part(&payload_bytes, &destination_hash, &source_hash);
+        // For hash computation, we need to use the payload WITHOUT the stamp,
+        // exactly matching Python's behavior which re-packs the payload array
+        // without the stamp element before computing the hash.
+        // See LXMessage.unpack_from_bytes in Python LXMF.
+        let payload_bytes_for_hash = if decoded.stamp.is_some() {
+            // Re-encode payload without stamp (4 elements)
+            encode_payload_without_stamp(
+                decoded.timestamp,
+                &decoded.title,
+                &decoded.content,
+                &decoded.fields,
+            )?
+        } else {
+            // No stamp, use original bytes
+            payload_bytes.clone()
+        };
+
+        let mut hashed_part = hashed_part(&payload_bytes_for_hash, &destination_hash, &source_hash);
         let message_hash = Hash::new_from_slice(&hashed_part);
         hashed_part.extend_from_slice(message_hash.as_slice());
 
@@ -336,6 +382,8 @@ impl LXMessage {
             desired_method: None,
             include_ticket: false,
             stamp: decoded.stamp,
+            stamp_cost: None,
+            stamp_value: None,
             state: State::Generating,
             method: ValidMethod::Direct,
             representation: Representation::Packet,
@@ -428,11 +476,9 @@ impl LXMessage {
         let signature_bytes = self
             .signature
             .ok_or_else(|| MessageError::InvalidFormat("Missing signature".into()))?;
-        let payload_bytes = self
-            .payload_bytes
-            .as_ref()
-            .ok_or_else(|| MessageError::InvalidFormat("Missing payload bytes".into()))?;
-        let mut hashed_part = hashed_part(payload_bytes, &self.destination_hash, &self.source_hash);
+        let payload_bytes = self.encode_payload_bytes(false)?;
+        let mut hashed_part =
+            hashed_part(&payload_bytes, &self.destination_hash, &self.source_hash);
         let message_hash = Hash::new_from_slice(&hashed_part);
         hashed_part.extend_from_slice(message_hash.as_slice());
         let signature =
@@ -446,9 +492,10 @@ impl LXMessage {
         Ok(true)
     }
 
-    fn encode_payload_bytes(&self) -> Result<Vec<u8>, MessageError> {
+    fn encode_payload_bytes(&self, include_stamp: bool) -> Result<Vec<u8>, MessageError> {
         let mut buf = Vec::new();
-        let len = if self.stamp.is_some() { 5 } else { 4 };
+        let include_stamp_entry = include_stamp && self.stamp.is_some();
+        let len = if include_stamp_entry { 5 } else { 4 };
         encode::write_array_len(&mut buf, len)
             .map_err(|e| MessageError::SerializationError(e.to_string()))?;
         encode::write_f64(&mut buf, self.payload.timestamp)
@@ -462,8 +509,10 @@ impl LXMessage {
                 .map_err(|e| MessageError::SerializationError(e.to_string()))?;
             write_bin(&mut buf, value)?;
         }
-        if let Some(stamp) = &self.stamp {
-            write_bin(&mut buf, stamp)?;
+        if include_stamp_entry {
+            if let Some(stamp) = &self.stamp {
+                write_bin(&mut buf, stamp)?;
+            }
         }
         Ok(buf)
     }
@@ -549,6 +598,32 @@ fn hashed_part(
     data.extend_from_slice(source_hash.as_slice());
     data.extend_from_slice(payload_bytes);
     data
+}
+
+/// Encode a payload array without the stamp element (4 elements only).
+/// This is used when unpacking a message with a stamp to compute the hash,
+/// matching Python's behavior which re-packs the payload without the stamp.
+fn encode_payload_without_stamp(
+    timestamp: f64,
+    title: &[u8],
+    content: &[u8],
+    fields: &IndexMap<String, Vec<u8>>,
+) -> Result<Vec<u8>, MessageError> {
+    let mut buf = Vec::new();
+    encode::write_array_len(&mut buf, 4)
+        .map_err(|e| MessageError::SerializationError(e.to_string()))?;
+    encode::write_f64(&mut buf, timestamp)
+        .map_err(|e| MessageError::SerializationError(e.to_string()))?;
+    write_bin(&mut buf, title)?;
+    write_bin(&mut buf, content)?;
+    encode::write_map_len(&mut buf, fields.len() as u32)
+        .map_err(|e| MessageError::SerializationError(e.to_string()))?;
+    for (key, value) in fields {
+        encode::write_str(&mut buf, key)
+            .map_err(|e| MessageError::SerializationError(e.to_string()))?;
+        write_bin(&mut buf, value)?;
+    }
+    Ok(buf)
 }
 
 fn write_bin<W: Write>(writer: &mut W, data: &[u8]) -> Result<(), MessageError> {
@@ -695,10 +770,9 @@ pub enum UnverifiedReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reticulum::{destination::DestinationName, identity::PrivateIdentity};
+    use reticulum::{destination::DestinationName, hash::HASH_SIZE, identity::PrivateIdentity};
 
-    #[test]
-    fn pack_and_unpack_roundtrip() {
+    fn sample_message() -> LXMessage {
         let sender = PrivateIdentity::new_from_name("sender");
         let receiver = PrivateIdentity::new_from_name("receiver");
         let source_destination =
@@ -711,7 +785,7 @@ mod tests {
         let mut fields = IndexMap::new();
         fields.insert("lang".into(), b"rust".to_vec());
 
-        let mut message = LXMessage::new(
+        LXMessage::new(
             destination,
             source_destination,
             "hello".as_bytes(),
@@ -719,8 +793,74 @@ mod tests {
             Some(fields),
             Some(ValidMethod::Direct),
             false,
+        )
+    }
+
+    /// Test that payload encoding matches Python's msgpack exactly.
+    ///
+    /// Python reference (LXMF/LXMessage.py pack() method):
+    /// ```python
+    /// payload = [timestamp, title, content, fields]
+    /// msgpack.packb(payload)
+    /// ```
+    ///
+    /// For timestamp=1234567890.123456, title=b"greet", content=b"hello", fields={}:
+    /// Python produces: 94cb41d26580b487e6b4c4056772656574c40568656c6c6f80
+    ///
+    /// For same with fields={"lang": b"rust"}:
+    /// Python produces: 94cb41d26580b487e6b4c4056772656574c40568656c6c6f81a46c616e67c40472757374
+    #[test]
+    fn payload_encoding_matches_python() {
+        // Create a message with specific timestamp
+        let mut message = sample_message();
+
+        // Set empty fields and specific timestamp to match Python test case
+        message.payload.fields = IndexMap::new();
+        message.payload.timestamp = 1234567890.123456;
+        message.payload.title = b"greet".to_vec();
+        message.payload.content = b"hello".to_vec();
+
+        let encoded = message.encode_payload_bytes(false).unwrap();
+        let expected: Vec<u8> = vec![
+            0x94, // fixarray(4)
+            0xcb, 0x41, 0xd2, 0x65, 0x80, 0xb4, 0x87, 0xe6, 0xb4, // float64 timestamp
+            0xc4, 0x05, 0x67, 0x72, 0x65, 0x65, 0x74, // bin8 "greet"
+            0xc4, 0x05, 0x68, 0x65, 0x6c, 0x6c, 0x6f, // bin8 "hello"
+            0x80, // fixmap(0) - empty dict
+        ];
+
+        assert_eq!(
+            encoded, expected,
+            "Empty fields payload mismatch.\nRust:   {:02x?}\nPython: {:02x?}",
+            encoded, expected
         );
 
+        // Test with field entry
+        let mut fields = IndexMap::new();
+        fields.insert("lang".into(), b"rust".to_vec());
+        message.payload.fields = fields;
+
+        let encoded_with_field = message.encode_payload_bytes(false).unwrap();
+        let expected_with_field: Vec<u8> = vec![
+            0x94, // fixarray(4)
+            0xcb, 0x41, 0xd2, 0x65, 0x80, 0xb4, 0x87, 0xe6, 0xb4, // float64 timestamp
+            0xc4, 0x05, 0x67, 0x72, 0x65, 0x65, 0x74, // bin8 "greet"
+            0xc4, 0x05, 0x68, 0x65, 0x6c, 0x6c, 0x6f, // bin8 "hello"
+            0x81, // fixmap(1)
+            0xa4, 0x6c, 0x61, 0x6e, 0x67, // fixstr "lang"
+            0xc4, 0x04, 0x72, 0x75, 0x73, 0x74, // bin8 "rust"
+        ];
+
+        assert_eq!(
+            encoded_with_field, expected_with_field,
+            "Fields payload mismatch.\nRust:   {:02x?}\nPython: {:02x?}",
+            encoded_with_field, expected_with_field
+        );
+    }
+
+    #[test]
+    fn pack_and_unpack_roundtrip() {
+        let mut message = sample_message();
         let packed = message.pack().expect("pack successful").to_vec();
         assert!(packed.len() > 0);
 
@@ -728,5 +868,171 @@ mod tests {
         assert_eq!(unpacked.payload.content, b"hello".to_vec());
         assert_eq!(unpacked.payload.title, b"greet".to_vec());
         assert_eq!(unpacked.payload.fields.get("lang"), Some(&b"rust".to_vec()));
+    }
+
+    #[test]
+    fn stamping_preserves_message_hash() {
+        let mut message = sample_message();
+        message.pack().expect("pack");
+        let first_hash = message.message_hash().expect("hash").as_slice().to_vec();
+
+        message.set_stamp(Some(vec![0xAA; HASH_SIZE]));
+        message.pack().expect("repack");
+        let second_hash = message.message_hash().expect("hash").as_slice().to_vec();
+
+        assert_eq!(first_hash, second_hash);
+    }
+
+    #[test]
+    fn stamp_is_encoded_in_payload() {
+        let mut message = sample_message();
+        message.pack().expect("initial pack");
+        message.set_stamp(Some(vec![0x55; HASH_SIZE]));
+        message.pack().expect("repack with stamp");
+        let packed = message.pack().expect("final pack").to_vec();
+
+        let decoded = LXMessage::unpack_from_bytes(&packed).expect("unpack");
+        assert!(decoded.stamp().is_some());
+        assert_eq!(decoded.stamp().unwrap().len(), HASH_SIZE);
+    }
+
+    /// Test that message hash computation matches Python's RNS.Identity.full_hash.
+    ///
+    /// Python reference:
+    /// ```python
+    /// hashed_part = b"" + destination_hash + source_hash + msgpack.packb(payload)
+    /// self.hash = RNS.Identity.full_hash(hashed_part)  # SHA-256
+    /// ```
+    ///
+    /// For destination_hash=0x00*16, source_hash=0x00*16,
+    /// payload=[1234567890.123456, b"greet", b"hello", {}]:
+    /// Python produces: 7dab36ed1047be956098ade44e1966b21ce8dd469648e711e43611c90790838f
+    #[test]
+    fn message_hash_matches_python() {
+        use reticulum::hash::Hash;
+
+        // Use known input data
+        let destination_hash = AddressHash::new([0u8; 16]);
+        let source_hash = AddressHash::new([0u8; 16]);
+
+        let timestamp = 1234567890.123456;
+        let title = b"greet".to_vec();
+        let content = b"hello".to_vec();
+        let fields = IndexMap::new();
+
+        let payload = LxPayload::from_parts(timestamp, title, content, fields);
+
+        // Encode payload
+        let mut buf = Vec::new();
+        encode::write_array_len(&mut buf, 4).unwrap();
+        encode::write_f64(&mut buf, payload.timestamp).unwrap();
+        write_bin(&mut buf, &payload.title).unwrap();
+        write_bin(&mut buf, &payload.content).unwrap();
+        encode::write_map_len(&mut buf, payload.fields.len() as u32).unwrap();
+
+        // Build hashed_part
+        let mut hashed_part_data = Vec::new();
+        hashed_part_data.extend_from_slice(destination_hash.as_slice());
+        hashed_part_data.extend_from_slice(source_hash.as_slice());
+        hashed_part_data.extend_from_slice(&buf);
+
+        // Compute hash using the same method as pack()
+        let message_hash = Hash::new_from_slice(&hashed_part_data);
+
+        // Python reference hash
+        let expected_hex = "7dab36ed1047be956098ade44e1966b21ce8dd469648e711e43611c90790838f";
+        let expected: Vec<u8> = (0..expected_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&expected_hex[i..i + 2], 16).unwrap())
+            .collect();
+
+        assert_eq!(
+            message_hash.as_slice(),
+            expected.as_slice(),
+            "Message hash mismatch.\nRust:   {:02x?}\nPython: {:02x?}",
+            message_hash.as_slice(),
+            expected.as_slice()
+        );
+    }
+
+    /// Test that unpacking a message with stamp produces the same hash as without stamp.
+    ///
+    /// This is critical for stamp validation: Python's receiver extracts the stamp,
+    /// re-packs the payload without the stamp, and computes the hash from that.
+    /// The Rust implementation must produce the same message_id.
+    ///
+    /// Python reference (LXMessage.unpack_from_bytes):
+    /// ```python
+    /// if len(unpacked_payload) > 4:
+    ///     stamp = unpacked_payload[4]
+    ///     unpacked_payload = unpacked_payload[:4]
+    ///     packed_payload = msgpack.packb(unpacked_payload)  # Re-pack without stamp
+    /// hashed_part = b"" + destination_hash + source_hash + packed_payload
+    /// message_hash = RNS.Identity.full_hash(hashed_part)
+    /// ```
+    #[test]
+    fn unpack_message_with_stamp_produces_same_hash() {
+        use reticulum::hash::HASH_SIZE;
+
+        // Build a packed message: dest_hash + src_hash + signature + payload_with_stamp
+        let destination_hash = [0u8; 16];
+        let source_hash = [0u8; 16];
+        let fake_signature = [0u8; 64];
+
+        // Known payload values
+        let timestamp = 1234567890.123456;
+        let title = b"greet";
+        let content = b"hello";
+        let stamp = [0xab_u8; HASH_SIZE]; // Dummy stamp
+
+        // Encode payload WITH stamp (5 elements)
+        let mut payload_with_stamp = Vec::new();
+        encode::write_array_len(&mut payload_with_stamp, 5).unwrap();
+        encode::write_f64(&mut payload_with_stamp, timestamp).unwrap();
+        write_bin(&mut payload_with_stamp, title).unwrap();
+        write_bin(&mut payload_with_stamp, content).unwrap();
+        encode::write_map_len(&mut payload_with_stamp, 0).unwrap(); // empty fields
+        write_bin(&mut payload_with_stamp, &stamp).unwrap();
+
+        // Build full LXMF message bytes
+        let mut lxmf_bytes = Vec::new();
+        lxmf_bytes.extend_from_slice(&destination_hash);
+        lxmf_bytes.extend_from_slice(&source_hash);
+        lxmf_bytes.extend_from_slice(&fake_signature);
+        lxmf_bytes.extend_from_slice(&payload_with_stamp);
+
+        // Unpack the message
+        let unpacked = LXMessage::unpack_from_bytes(&lxmf_bytes).expect("unpack should succeed");
+
+        // Verify stamp was extracted
+        assert!(unpacked.stamp().is_some());
+        assert_eq!(unpacked.stamp().unwrap(), &stamp);
+
+        // Compute expected hash: same as payload WITHOUT stamp
+        // This is what Python would compute
+        let mut payload_without_stamp = Vec::new();
+        encode::write_array_len(&mut payload_without_stamp, 4).unwrap();
+        encode::write_f64(&mut payload_without_stamp, timestamp).unwrap();
+        write_bin(&mut payload_without_stamp, title).unwrap();
+        write_bin(&mut payload_without_stamp, content).unwrap();
+        encode::write_map_len(&mut payload_without_stamp, 0).unwrap();
+
+        let mut hashed_part_expected = Vec::new();
+        hashed_part_expected.extend_from_slice(&destination_hash);
+        hashed_part_expected.extend_from_slice(&source_hash);
+        hashed_part_expected.extend_from_slice(&payload_without_stamp);
+
+        use reticulum::hash::Hash;
+        let expected_hash = Hash::new_from_slice(&hashed_part_expected);
+
+        // Verify the unpacked message has the correct hash
+        let actual_hash = unpacked.message_hash().expect("should have hash");
+        assert_eq!(
+            actual_hash.as_slice(),
+            expected_hash.as_slice(),
+            "Unpacked message hash should match hash of payload without stamp.\nActual:   {:02x?}\nExpected: {:02x?}",
+            actual_hash.as_slice(),
+            expected_hash.as_slice()
+        );
     }
 }
