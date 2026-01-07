@@ -16,11 +16,17 @@ async fn main() {
 
     let args: Vec<String> = env::args().collect();
 
-    if args.len() != 2 {
-        eprintln!("Usage: {} <32-character-hex-destination>", args[0]);
-        eprintln!("Example: {} 564f0ec8b6ff3cbbedb3b2bb6069f567", args[0]);
+    if args.len() > 3 {
+        eprintln!("Usage: {} <32-character-hex-destination> [method]", args[0]);
+        eprintln!("Example: {} 564f0ec8b6ff3cbbedb3b2bb6069f567 direct", args[0]);
         return;
     }
+    let desired_method: Option<ValidMethod> = match args.get(2) {
+        Some(method_str) if method_str.to_lowercase() == "direct" => Some(ValidMethod::Direct),
+        Some(method_str) if method_str.to_lowercase() == "opportunistic" => Some(ValidMethod::Opportunistic),
+        _ => None,
+    };
+
 
     let destination_hex = &args[1];
 
@@ -138,7 +144,7 @@ async fn main() {
                 "Hello, this is the content of the message.".to_string(),
                 "Greetings".to_string(),
                 None,
-                Some(ValidMethod::Direct),
+                desired_method,
                 true,
             );
 

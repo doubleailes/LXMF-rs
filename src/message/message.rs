@@ -267,12 +267,13 @@ impl LXMessage {
 
     /// Return the bytes that should be handed to the underlying Reticulum transport.
     ///
-    /// Opportunistic deliveries reserve the destination hash for the packet header,
-    /// so we strip it before transmission to mirror the Python implementation.
+    /// Direct and Opportunistic deliveries use send_to_destination() which adds the
+    /// destination hash automatically, so we strip it from the payload.
+    /// Propagated and Paper methods need the full packed payload including the hash.
     pub fn transport_payload(&mut self) -> Result<Vec<u8>, MessageError> {
         let mut packed = self.pack()?.to_vec();
         match self.method {
-            ValidMethod::Opportunistic => {
+            ValidMethod::Direct | ValidMethod::Opportunistic => {
                 if packed.len() <= DESTINATION_LENGTH {
                     return Err(MessageError::InvalidFormat(
                         "Packed LXMF shorter than destination prefix".into(),
@@ -280,7 +281,7 @@ impl LXMessage {
                 }
                 Ok(packed.split_off(DESTINATION_LENGTH))
             }
-            _ => Ok(packed),
+            ValidMethod::Propagated | ValidMethod::Paper => Ok(packed),
         }
     }
 
