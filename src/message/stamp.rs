@@ -263,4 +263,97 @@ mod tests {
             &hkdf_output[..32], &expected_first_32
         );
     }
+
+    /// Comprehensive end-to-end test that verifies the stamp generation and
+    /// validation flow matches Python's behavior exactly.
+    ///
+    /// This test:
+    /// 1. Computes the message_id (hash of dest + src + payload_without_stamp)
+    /// 2. Generates a valid stamp for that message_id
+    /// 3. Simulates what Python's receiver would do to validate the stamp
+    /// 4. Verifies that the stamp is valid
+    ///
+    /// This matches the validation done in Python's LXMessage.validate_stamp():
+    /// ```python
+    /// workblock = LXStamper.stamp_workblock(self.message_id)
+    /// if LXStamper.stamp_valid(self.stamp, target_cost, workblock):
+    ///     ...
+    /// ```
+    #[test]
+    fn end_to_end_stamp_generation_and_validation() {
+        use reticulum::hash::AddressHash;
+        use rmp::encode;
+
+        // Use the same test data as message_hash_matches_python
+        let dest_hash = AddressHash::new([0u8; 16]);
+        let src_hash = AddressHash::new([0u8; 16]);
+        let timestamp: f64 = 1234567890.123456;
+        let title = b"greet";
+        let content = b"hello";
+
+        // Encode payload without stamp (exactly as Python does)
+        let mut payload_without_stamp = Vec::new();
+        encode::write_array_len(&mut payload_without_stamp, 4).unwrap();
+        encode::write_f64(&mut payload_without_stamp, timestamp).unwrap();
+        encode::write_bin_len(&mut payload_without_stamp, title.len() as u32).unwrap();
+        payload_without_stamp.extend_from_slice(title);
+        encode::write_bin_len(&mut payload_without_stamp, content.len() as u32).unwrap();
+        payload_without_stamp.extend_from_slice(content);
+        encode::write_map_len(&mut payload_without_stamp, 0).unwrap(); // empty fields
+
+        // Compute message_id = SHA256(dest + src + packed_payload_without_stamp)
+        let mut hashed_part = Vec::new();
+        hashed_part.extend_from_slice(dest_hash.as_slice());
+        hashed_part.extend_from_slice(src_hash.as_slice());
+        hashed_part.extend_from_slice(&payload_without_stamp);
+        let message_id = Hash::new_from_slice(&hashed_part);
+
+        // Verify the message_id matches the expected Python value
+        let expected_message_id = "7dab36ed1047be956098ade44e1966b21ce8dd469648e711e43611c90790838f";
+        let actual_message_id: String = message_id.as_slice().iter().map(|b| format!("{:02x}", b)).collect();
+        assert_eq!(actual_message_id, expected_message_id, "Message ID mismatch");
+
+        // Generate a valid stamp
+        let mut rng = ChaCha12Rng::seed_from_u64(42);
+        let target_cost = 8u8;
+        let params = StampParameters::default();
+        
+        let result = generate_stamp(&mut rng, message_id.as_slice(), target_cost, params, Some(100_000))
+            .expect("should generate stamp");
+        
+        assert!(result.value >= target_cost as u16, "Stamp value {} is less than target cost {}", result.value, target_cost);
+
+        // Now simulate what the Python receiver does:
+        // 1. Extract the stamp from the message payload
+        // 2. Re-pack the payload without stamp
+        // 3. Compute message_id from dest + src + repacked_payload
+        // 4. Generate workblock from message_id
+        // 5. Validate stamp against workblock
+
+        // For this test, we already have the message_id, so just validate the stamp
+        let receiver_workblock = stamp_workblock(message_id.as_slice(), params)
+            .expect("workblock generation should succeed");
+        
+        let is_valid = stamp_valid(&result.stamp, target_cost, &receiver_workblock);
+        let computed_value = stamp_value(&result.stamp, &receiver_workblock);
+
+        assert!(is_valid, 
+            "Stamp validation FAILED!\n\
+             Message ID:   {}\n\
+             Stamp (hex):  {:02x?}\n\
+             Target cost:  {}\n\
+             Stamp value:  {}\n\
+             Rounds used:  {}",
+            expected_message_id,
+            result.stamp,
+            target_cost,
+            computed_value,
+            result.rounds
+        );
+
+        assert_eq!(result.value, computed_value,
+            "Stamp value mismatch between generation ({}) and validation ({})",
+            result.value, computed_value
+        );
+    }
 }

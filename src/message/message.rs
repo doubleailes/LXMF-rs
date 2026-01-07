@@ -221,8 +221,10 @@ impl LXMessage {
             .ok_or(MessageError::MissingDestination)?;
         let source = self.source.as_ref().ok_or(MessageError::MissingSource)?;
 
-        let payload_core = self.encode_payload_bytes(false)?;
-        let mut hashed_part = hashed_part(&payload_core, &self.destination_hash, &self.source_hash);
+        // Python computes hash from payload WITHOUT stamp (see unpack_from_bytes which strips stamp)
+        let payload_without_stamp = self.encode_payload_bytes(false)?;
+        let mut hashed_part =
+            hashed_part(&payload_without_stamp, &self.destination_hash, &self.source_hash);
         let message_hash = Hash::new_from_slice(&hashed_part);
         self.hash = Some(message_hash);
 
@@ -233,10 +235,12 @@ impl LXMessage {
         self.signature_validated = true;
         self.unverified_reason = None;
 
-        let mut payload_bytes = payload_core;
-        if self.stamp.is_some() {
-            payload_bytes = self.encode_payload_bytes(true)?;
-        }
+        // Build final payload with stamp if present
+        let payload_bytes = if self.stamp.is_some() {
+            self.encode_payload_bytes(true)?
+        } else {
+            payload_without_stamp
+        };
 
         let mut packed =
             Vec::with_capacity(DESTINATION_LENGTH * 2 + SIGNATURE_LENGTH + payload_bytes.len());

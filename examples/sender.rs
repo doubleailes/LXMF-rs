@@ -67,7 +67,7 @@ async fn main() {
         .iface_manager()
         .lock()
         .await
-        .spawn(TcpClient::new("127.0.0.1:4242"), TcpClient::spawn);
+        .spawn(TcpClient::new("amsterdam.connect.reticulum.network:4965"), TcpClient::spawn);
     log::info!("Creating and sending LXMessage...");
     loop {
         if transport.has_path(&destination_hash).await {
@@ -106,8 +106,30 @@ async fn main() {
                 Some(ValidMethod::Opportunistic),
                 true,
             );
-            // Set stamp cost to trigger stamp generation (cost 8 = 2^8 = 256 work iterations)
+            // Set stamp cost to trigger stamp generation.
+            // Note: The receiver's configured stamp cost must be <= this value for the stamp to be valid.
+            // A cost of 8 produces a stamp valid for costs 1-10 (average case).
+            // If the receiver requires cost 12+, increase this value accordingly.
             message.set_stamp_cost(Some(8));
+
+            // Debug: print the message hash BEFORE enqueuing
+            // The message isn't packed yet, so we need to pack it first to see the hash
+            if let Ok(packed) = message.pack() {
+                log::debug!("PACKED MESSAGE (BEFORE router processing):");
+                log::debug!("  Packed length: {}", packed.len());
+                let hex_str: String = packed.iter().map(|b| format!("{:02x}", b)).collect();
+                log::debug!("  Packed hex: {}", hex_str);
+                if let Some(hash) = message.message_hash() {
+                    let hash_hex: String = hash.as_slice().iter().map(|b| format!("{:02x}", b)).collect();
+                    log::debug!("  Message hash: {}", hash_hex);
+                }
+                if let Some(stamp) = message.stamp() {
+                    let stamp_hex: String = stamp.iter().map(|b| format!("{:02x}", b)).collect();
+                    log::debug!("  Stamp: {}", stamp_hex);
+                } else {
+                    log::debug!("  Stamp: None");
+                }
+            }
 
             router.enqueue_outbound(message);
             log::info!(
