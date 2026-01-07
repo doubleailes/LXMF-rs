@@ -1,4 +1,4 @@
-use LXMF_rs::{LXMessage, LxmRouter, RouterConfig, ValidMethod};
+use LXMF_rs::{stamp_cost_from_app_data, LXMessage, LxmRouter, RouterConfig, ValidMethod};
 use rand_core::OsRng;
 use reticulum::destination::{DestinationName, SingleInputDestination, SingleOutputDestination};
 use reticulum::hash::AddressHash;
@@ -67,9 +67,51 @@ async fn main() {
         .iface_manager()
         .lock()
         .await
-        .spawn(TcpClient::new("amsterdam.connect.reticulum.network:4965"), TcpClient::spawn);
+        .spawn(
+            TcpClient::new("amsterdam.connect.reticulum.network:4965"),
+            TcpClient::spawn,
+        );
+
+    // Subscribe to announces to receive stamp_cost discovery
+    let mut announce_rx = transport.recv_announces().await;
+
     log::info!("Creating and sending LXMessage...");
+    log::info!("Waiting for destination announce to discover stamp cost...");
+
+    // Track discovered stamp cost from announces
+    let mut discovered_stamp_cost: Option<u8> = None;
+
     loop {
+        // Check for incoming announces to discover stamp_cost
+        // This implements Python LXMF's LXMFDeliveryAnnounceHandler behavior
+        while let Ok(announce_event) = announce_rx.try_recv() {
+            let dest = announce_event.destination.lock().await;
+            let announce_dest_hash = dest.desc.address_hash;
+
+            if announce_dest_hash == destination_hash {
+                // Extract stamp_cost from the announce app_data
+                let app_data = announce_event.app_data.as_slice();
+                if let Some(cost) = stamp_cost_from_app_data(app_data) {
+                    log::info!(
+                        "Discovered stamp cost {} from announce for {}",
+                        cost,
+                        destination_hash
+                    );
+                    discovered_stamp_cost = Some(cost);
+
+                    // Update the router's cached stamp cost for this destination
+                    if let Err(err) = router.update_outbound_stamp_cost(destination_hash, cost) {
+                        log::warn!("Failed to update cached stamp cost: {}", err);
+                    }
+                } else {
+                    log::debug!(
+                        "Announce from {} has no stamp cost requirement",
+                        destination_hash
+                    );
+                }
+            }
+        }
+
         if transport.has_path(&destination_hash).await {
             let destination_identity =
                 match transport.recall_identity(&destination_hash, false).await {
@@ -106,11 +148,19 @@ async fn main() {
                 Some(ValidMethod::Opportunistic),
                 true,
             );
-            // Set stamp cost to trigger stamp generation.
-            // Note: The receiver's configured stamp cost must be <= this value for the stamp to be valid.
-            // A cost of 8 produces a stamp valid for costs 1-10 (average case).
-            // If the receiver requires cost 12+, increase this value accordingly.
-            message.set_stamp_cost(Some(8));
+
+            // Use discovered stamp cost from announce, or check router's cache
+            let stamp_cost = discovered_stamp_cost
+                .or_else(|| router.get_outbound_stamp_cost(destination_hash));
+
+            if let Some(cost) = stamp_cost {
+                log::info!("Using stamp cost {} (from announce discovery)", cost);
+                message.set_stamp_cost(Some(cost));
+            } else {
+                log::warn!(
+                    "No stamp cost discovered for destination. Message may be rejected if receiver requires stamps."
+                );
+            }
 
             // Debug: print the message hash BEFORE enqueuing
             // The message isn't packed yet, so we need to pack it first to see the hash
@@ -120,7 +170,8 @@ async fn main() {
                 let hex_str: String = packed.iter().map(|b| format!("{:02x}", b)).collect();
                 log::debug!("  Packed hex: {}", hex_str);
                 if let Some(hash) = message.message_hash() {
-                    let hash_hex: String = hash.as_slice().iter().map(|b| format!("{:02x}", b)).collect();
+                    let hash_hex: String =
+                        hash.as_slice().iter().map(|b| format!("{:02x}", b)).collect();
                     log::debug!("  Message hash: {}", hash_hex);
                 }
                 if let Some(stamp) = message.stamp() {
