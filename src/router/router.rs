@@ -180,7 +180,10 @@ impl LXMFDeliveryAnnounceHandler {
         match std::panic::catch_unwind(|| stamp_cost_from_app_data(app_data)) {
             Ok(stamp_cost_opt) => {
                 if let Some(stamp_cost) = stamp_cost_opt {
-                    if let Err(e) = self.lxmrouter.update_outbound_stamp_cost(destination_hash, stamp_cost) {
+                    if let Err(e) = self
+                        .lxmrouter
+                        .update_outbound_stamp_cost(destination_hash, stamp_cost)
+                    {
                         error!(
                             "Failed to update stamp cost for {}: {}",
                             hex::encode(destination_hash.as_slice()),
@@ -665,9 +668,7 @@ impl LxmRouter {
         };
 
         let stamp_cost: rmpv::Value = match dest.inbound_stamp_cost {
-            Some(cost) if cost > 0 && cost < 255 => {
-                rmpv::Value::Integer(rmpv::Integer::from(cost))
-            }
+            Some(cost) if cost > 0 && cost < 255 => rmpv::Value::Integer(rmpv::Integer::from(cost)),
             _ => rmpv::Value::Nil,
         };
 
@@ -761,9 +762,10 @@ impl LxmRouter {
         let mut map = self.inner.delivery_destinations.lock().unwrap();
         if let Some(dest) = map.get_mut(&destination_hash) {
             if let Some(cost) = stamp_cost
-                && (cost == 0 || cost >= 255) {
-                    return Err(RouterError::StampCostOutOfRange(cost as u32));
-                }
+                && (cost == 0 || cost >= 255)
+            {
+                return Err(RouterError::StampCostOutOfRange(cost as u32));
+            }
             dest.inbound_stamp_cost = stamp_cost;
             Ok(())
         } else {
@@ -1101,9 +1103,10 @@ impl LxmRouter {
         message: &mut LXMessage,
     ) -> Result<(), OutboundPreparationError> {
         if message.stamp_cost().is_none()
-            && let Some(cost) = self.get_outbound_stamp_cost(message.destination_hash()) {
-                message.set_stamp_cost(Some(cost));
-            }
+            && let Some(cost) = self.get_outbound_stamp_cost(message.destination_hash())
+        {
+            message.set_stamp_cost(Some(cost));
+        }
 
         message.pack().map_err(OutboundPreparationError::Message)?;
 
@@ -1166,12 +1169,13 @@ impl LxmRouter {
         let entries = self.inner.propagation_entries.lock().unwrap();
         let total: u64 = entries.values().map(|entry| entry.size).sum();
         if let Some(limit) = limit
-            && total > limit {
-                warn!(
-                    "Message store exceeds limit ({} > {} bytes), culling not yet implemented",
-                    total, limit
-                );
-            }
+            && total > limit
+        {
+            warn!(
+                "Message store exceeds limit ({} > {} bytes), culling not yet implemented",
+                total, limit
+            );
+        }
     }
 
     fn clean_available_tickets(&self) {
