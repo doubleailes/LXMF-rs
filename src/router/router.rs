@@ -19,21 +19,21 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use log::{error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use rand_core::OsRng;
 use reticulum::{
     destination::{DestinationName, SingleOutputDestination},
     error::RnsError,
     hash::{ADDRESS_HASH_SIZE, AddressHash},
     identity::PrivateIdentity,
-    packet::PacketContext,
-    transport::Transport,
+    packet::{PacketContext, PacketDataBuffer},
+    transport::{AnnounceHandler, Transport},
 };
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 
 use crate::{
-    LXMessage, LxmPeer, SyncStrategy, ValidMethod,
+    LXMessage, LxmPeer, PeerMetadata, SyncStrategy, ValidMethod,
     message::{
         MessageError,
         message::State,
@@ -44,8 +44,8 @@ use crate::{
 use super::error::RouterError;
 
 pub const APP_NAME: &str = "lxmf";
-const DELIVERY_ASPECT: &str = "delivery";
-const PROPAGATION_ASPECT: &str = "propagation";
+pub const DELIVERY_ASPECT: &str = "delivery";
+pub const PROPAGATION_ASPECT: &str = "propagation";
 
 pub const MAX_DELIVERY_ATTEMPTS: u8 = 5;
 pub const PROCESSING_INTERVAL: Duration = Duration::from_secs(4);
@@ -243,6 +243,347 @@ impl LXMFDeliveryAnnounceHandler {
     pub fn router(&self) -> &LxmRouter {
         &self.lxmrouter
     }
+}
+
+/// Implementation of the Reticulum AnnounceHandler trait for LXMF delivery announces.
+///
+/// This allows the handler to be registered with the transport using
+/// `transport.register_announce_handler()`.
+impl AnnounceHandler for LXMFDeliveryAnnounceHandler {
+    fn handle_announce(
+        &self,
+        destination: Arc<tokio::sync::Mutex<reticulum::destination::SingleOutputDestination>>,
+        app_data: PacketDataBuffer,
+    ) {
+        // Get destination hash from destination in a blocking manner
+        // since this is called from an async context but our internal logic is sync
+        let destination_hash = {
+            // Use a blocking task to get the destination hash
+            let dest = destination.blocking_lock();
+            dest.desc.address_hash
+        };
+
+        trace!(
+            "AnnounceHandler: received delivery announce from {}",
+            hex::encode(destination_hash.as_slice())
+        );
+
+        // Call the existing received_announce method
+        self.received_announce(destination_hash, app_data.as_slice());
+    }
+
+    fn aspect_filter(&self) -> Option<&str> {
+        Some(DELIVERY_ASPECT)
+    }
+
+    fn receive_path_responses(&self) -> bool {
+        self.receive_path_responses
+    }
+}
+
+/// LXMF Propagation Node Announce Handler
+///
+/// Handles incoming announces for the "lxmf.propagation" aspect.
+/// When an announce is received from a propagation node, it:
+/// 1. Validates the propagation node announce data format
+/// 2. Extracts peer configuration (timebase, transfer limits, stamp costs, etc.)
+/// 3. Manages automatic peering with other propagation nodes
+/// 4. Updates peer state for existing peers
+///
+/// References Python LXMF/Handlers.py class LXMFPropagationAnnounceHandler
+pub struct LXMFPropagationAnnounceHandler {
+    /// The aspect filter for this handler: "lxmf.propagation"
+    pub aspect_filter: String,
+    /// Whether to receive path responses (always true for LXMF propagation)
+    pub receive_path_responses: bool,
+    /// Reference to the LXMF router
+    lxmrouter: LxmRouter,
+}
+
+impl LXMFPropagationAnnounceHandler {
+    /// Create a new propagation announce handler for the given router.
+    pub fn new(lxmrouter: LxmRouter) -> Self {
+        Self {
+            aspect_filter: format!("{}.{}", APP_NAME, PROPAGATION_ASPECT),
+            receive_path_responses: true,
+            lxmrouter,
+        }
+    }
+
+    /// Handle a received propagation node announce.
+    ///
+    /// This method should be called when an announce is received for a destination
+    /// matching the propagation aspect filter. It will:
+    /// 1. Validate the propagation node announce data format
+    /// 2. Extract peer configuration and update peer state
+    /// 3. Manage automatic peering if enabled
+    ///
+    /// # Arguments
+    /// * `destination_hash` - The hash of the announcing propagation node
+    /// * `app_data` - The application data from the announce (propagation node config)
+    /// * `is_path_response` - Whether this announce is a path response
+    ///
+    /// References Python LXMF/Handlers.py LXMFPropagationAnnounceHandler.received_announce()
+    pub fn received_announce(
+        &self,
+        destination_hash: AddressHash,
+        app_data: &[u8],
+        is_path_response: bool,
+    ) {
+        // Only process if we're running as a propagation node
+        if !self.lxmrouter.is_propagation_node() {
+            return;
+        }
+
+        // Validate propagation node announce data
+        let pn_data = match pn_announce_data_is_valid(app_data) {
+            Some(data) => data,
+            None => {
+                trace!(
+                    "Ignoring invalid propagation node announce from {}",
+                    hex::encode(destination_hash.as_slice())
+                );
+                return;
+            }
+        };
+
+        let node_timebase = pn_data.timebase;
+        let propagation_enabled = pn_data.node_state;
+        let propagation_transfer_limit = pn_data.transfer_limit;
+        let propagation_sync_limit = pn_data.sync_limit;
+        let propagation_stamp_cost = pn_data.stamp_cost;
+        let propagation_stamp_cost_flexibility = pn_data.stamp_flexibility;
+        let peering_cost = pn_data.peering_cost;
+        let metadata = pn_data.metadata.clone();
+
+        // Check if this is a static peer
+        let is_static_peer = self.lxmrouter.is_static_peer(&destination_hash);
+
+        if is_static_peer {
+            // Always update static peers
+            if !is_path_response || self.lxmrouter.peer_last_heard(&destination_hash) == 0.0 {
+                if let Err(e) = self.lxmrouter.peer(
+                    destination_hash,
+                    node_timebase,
+                    propagation_transfer_limit,
+                    propagation_sync_limit,
+                    propagation_stamp_cost,
+                    propagation_stamp_cost_flexibility,
+                    peering_cost,
+                    metadata.clone(),
+                ) {
+                    warn!("Failed to update static peer {}: {}", destination_hash, e);
+                }
+            }
+        } else {
+            // Auto-peering logic for non-static peers
+            if self.lxmrouter.autopeer_enabled() && !is_path_response {
+                if propagation_enabled {
+                    // TODO: Check hops_to when transport provides this info
+                    // For now, auto-peer with all propagation nodes within range
+                    if let Err(e) = self.lxmrouter.peer(
+                        destination_hash,
+                        node_timebase,
+                        propagation_transfer_limit,
+                        propagation_sync_limit,
+                        propagation_stamp_cost,
+                        propagation_stamp_cost_flexibility,
+                        peering_cost,
+                        metadata,
+                    ) {
+                        warn!("Failed to auto-peer with {}: {}", destination_hash, e);
+                    }
+                } else {
+                    // Propagation node disabled, unpeer if we had a peering
+                    self.lxmrouter.unpeer(&destination_hash);
+                }
+            }
+        }
+    }
+
+    /// Get a reference to the underlying router.
+    pub fn router(&self) -> &LxmRouter {
+        &self.lxmrouter
+    }
+}
+
+/// Implementation of the Reticulum AnnounceHandler trait for LXMF propagation announces.
+///
+/// This allows the handler to be registered with the transport using
+/// `transport.register_announce_handler()`.
+impl AnnounceHandler for LXMFPropagationAnnounceHandler {
+    fn handle_announce(
+        &self,
+        destination: Arc<tokio::sync::Mutex<reticulum::destination::SingleOutputDestination>>,
+        app_data: PacketDataBuffer,
+    ) {
+        // Get destination hash from destination in a blocking manner
+        let destination_hash = {
+            let dest = destination.blocking_lock();
+            dest.desc.address_hash
+        };
+
+        trace!(
+            "AnnounceHandler: received propagation announce from {}",
+            hex::encode(destination_hash.as_slice())
+        );
+
+        // For now, assume non-path-response announces
+        // TODO: Track path response state when available from transport
+        self.received_announce(destination_hash, app_data.as_slice(), false);
+    }
+
+    fn aspect_filter(&self) -> Option<&str> {
+        Some(PROPAGATION_ASPECT)
+    }
+
+    fn receive_path_responses(&self) -> bool {
+        self.receive_path_responses
+    }
+}
+
+/// Validated propagation node announce data.
+///
+/// References Python LXMF/LXMF.py pn_announce_data_is_valid()
+#[derive(Debug, Clone)]
+pub struct PropagationNodeAnnounceData {
+    /// Current node timebase (Unix timestamp)
+    pub timebase: f64,
+    /// Whether the propagation node is active
+    pub node_state: bool,
+    /// Per-transfer limit for message propagation in bytes (None = unlimited)
+    pub transfer_limit: Option<f64>,
+    /// Limit for incoming propagation node syncs in bytes (None = unlimited)
+    pub sync_limit: Option<f64>,
+    /// Propagation stamp cost for this node
+    pub stamp_cost: Option<u32>,
+    /// Stamp cost flexibility
+    pub stamp_flexibility: Option<u32>,
+    /// Peering cost
+    pub peering_cost: Option<u32>,
+    /// Node metadata (uses IndexMap to match PeerMetadata type)
+    pub metadata: Option<PeerMetadata>,
+}
+
+/// Validate and extract data from a propagation node announce.
+///
+/// Returns `Some(PropagationNodeAnnounceData)` if the announce data is valid,
+/// `None` otherwise.
+///
+/// References Python LXMF/LXMF.py pn_announce_data_is_valid()
+pub fn pn_announce_data_is_valid(app_data: &[u8]) -> Option<PropagationNodeAnnounceData> {
+    if app_data.is_empty() {
+        return None;
+    }
+
+    // Decode msgpack array
+    let mut cursor = std::io::Cursor::new(app_data);
+    let data = rmpv::decode::read_value(&mut cursor).ok()?;
+
+    let arr = match data {
+        rmpv::Value::Array(arr) => arr,
+        _ => return None,
+    };
+
+    // Must have at least 7 elements for v0.5.0+ format
+    if arr.len() < 7 {
+        trace!(
+            "Invalid announce data: Insufficient peer data, likely from deprecated LXMF version"
+        );
+        return None;
+    }
+
+    // slot 1: timebase (integer) - convert to f64
+    let timebase = match &arr[1] {
+        rmpv::Value::Integer(n) => n.as_i64()? as f64,
+        _ => return None,
+    };
+
+    // slot 2: propagation node state (boolean)
+    let node_state = match &arr[2] {
+        rmpv::Value::Boolean(b) => *b,
+        _ => return None,
+    };
+
+    // slot 3: transfer limit (integer) - convert to f64 bytes
+    // Python stores this in kilobytes, so multiply by 1000
+    let transfer_limit = match &arr[3] {
+        rmpv::Value::Integer(n) => Some((n.as_u64()? as f64) * 1000.0),
+        rmpv::Value::Nil => None,
+        _ => return None,
+    };
+
+    // slot 4: sync limit (integer) - convert to f64 bytes
+    let sync_limit = match &arr[4] {
+        rmpv::Value::Integer(n) => Some((n.as_u64()? as f64) * 1000.0),
+        rmpv::Value::Nil => None,
+        _ => return None,
+    };
+
+    // slot 5: stamp costs array [stamp_cost, stamp_flexibility, peering_cost]
+    let stamp_costs = match &arr[5] {
+        rmpv::Value::Array(costs) if costs.len() >= 3 => costs,
+        _ => return None,
+    };
+
+    let stamp_cost = match &stamp_costs[0] {
+        rmpv::Value::Integer(n) => Some(n.as_u64()? as u32),
+        rmpv::Value::Nil => None,
+        _ => return None,
+    };
+
+    let stamp_flexibility = match &stamp_costs[1] {
+        rmpv::Value::Integer(n) => Some(n.as_u64()? as u32),
+        rmpv::Value::Nil => None,
+        _ => return None,
+    };
+
+    let peering_cost = match &stamp_costs[2] {
+        rmpv::Value::Integer(n) => Some(n.as_u64()? as u32),
+        rmpv::Value::Nil => None,
+        _ => return None,
+    };
+
+    // slot 6: metadata (map) - use IndexMap for PeerMetadata compatibility
+    let metadata = match &arr[6] {
+        rmpv::Value::Map(map) => {
+            let mut result = indexmap::IndexMap::new();
+            for (k, v) in map {
+                if let (rmpv::Value::Integer(key), rmpv::Value::Binary(val)) = (k, v) {
+                    if let Some(key_u8) = key.as_u64().and_then(|n| u8::try_from(n).ok()) {
+                        result.insert(key_u8, val.clone());
+                    }
+                }
+            }
+            if result.is_empty() {
+                None
+            } else {
+                Some(result)
+            }
+        }
+        _ => None,
+    };
+
+    Some(PropagationNodeAnnounceData {
+        timebase,
+        node_state,
+        transfer_limit,
+        sync_limit,
+        stamp_cost,
+        stamp_flexibility,
+        peering_cost,
+        metadata,
+    })
+}
+
+/// Extract propagation node name from metadata.
+///
+/// References Python LXMF/LXMF.py pn_name_from_app_data()
+pub fn pn_name_from_app_data(app_data: &[u8]) -> Option<String> {
+    let pn_data = pn_announce_data_is_valid(app_data)?;
+    let metadata = pn_data.metadata.as_ref()?;
+    let name_bytes = metadata.get(&PN_META_NAME)?;
+    String::from_utf8(name_bytes.clone()).ok()
 }
 
 /// Router configuration mirrors the Python arguments.
@@ -1356,6 +1697,164 @@ impl LxmRouter {
         let bytes = rmp_serde::to_vec_named(&snapshots)?;
         fs::write(peers_path, bytes)?;
         Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Helper methods for LXMFPropagationAnnounceHandler
+    // -------------------------------------------------------------------------
+
+    /// Check if this router is running as a propagation node.
+    ///
+    /// Returns `true` if propagation mode has been enabled via `enable_propagation()`.
+    pub fn is_propagation_node(&self) -> bool {
+        *self.inner.propagation_node.lock().unwrap()
+    }
+
+    /// Check if the given destination hash is a configured static peer.
+    ///
+    /// Static peers are those configured via `RouterConfig::static_peers` and
+    /// are always maintained regardless of announce activity.
+    pub fn is_static_peer(&self, destination_hash: &AddressHash) -> bool {
+        self.inner.cfg.static_peers.contains(destination_hash)
+    }
+
+    /// Get the last heard timestamp for a peer.
+    ///
+    /// Returns `0.0` if the peer is not known.
+    pub fn peer_last_heard(&self, destination_hash: &AddressHash) -> f64 {
+        self.inner
+            .peers
+            .lock()
+            .unwrap()
+            .get(destination_hash)
+            .map(|peer| peer.last_heard())
+            .unwrap_or(0.0)
+    }
+
+    /// Check if auto-peering is enabled.
+    ///
+    /// When enabled, the router will automatically peer with propagation nodes
+    /// that announce themselves within the configured hop depth.
+    pub fn autopeer_enabled(&self) -> bool {
+        self.inner.cfg.autopeer
+    }
+
+    /// Create or update a peering with a propagation node.
+    ///
+    /// This method creates a new `LxmPeer` entry or updates an existing one
+    /// with the provided configuration from the propagation node's announce.
+    ///
+    /// # Arguments
+    /// * `destination_hash` - The address hash of the propagation node
+    /// * `timebase` - The node's peering timebase
+    /// * `transfer_limit` - Maximum bytes per transfer (None = unlimited)
+    /// * `sync_limit` - Maximum bytes per sync (None = unlimited)
+    /// * `stamp_cost` - Required stamp cost for propagation
+    /// * `stamp_flexibility` - Flexibility in stamp cost acceptance
+    /// * `peering_cost` - Required peering key cost
+    /// * `metadata` - Node metadata (name, etc.)
+    ///
+    /// References Python LXMF/LXMRouter.py peer() method
+    #[allow(clippy::too_many_arguments)]
+    pub fn peer(
+        &self,
+        destination_hash: AddressHash,
+        timebase: f64,
+        transfer_limit: Option<f64>,
+        sync_limit: Option<f64>,
+        stamp_cost: Option<u32>,
+        stamp_flexibility: Option<u32>,
+        peering_cost: Option<u32>,
+        metadata: Option<PeerMetadata>,
+    ) -> Result<(), RouterError> {
+        let mut peers = self.inner.peers.lock().unwrap();
+
+        if let Some(peer) = peers.get_mut(&destination_hash) {
+            // Update existing peer
+            peer.set_last_heard(unix_time_f64());
+            peer.set_alive(true);
+            peer.set_peering_cost(peering_cost);
+            peer.set_metadata(metadata);
+            // Update propagation limits via peer methods
+            // Note: LxmPeer would need setters for these if not already present
+            debug!(
+                "Updated peer {} (timebase: {}, transfer_limit: {:?}, sync_limit: {:?})",
+                hex::encode(destination_hash.as_slice()),
+                timebase,
+                transfer_limit,
+                sync_limit
+            );
+        } else {
+            // Check if we've reached max peers (excluding static peers)
+            let current_dynamic_peers = peers
+                .keys()
+                .filter(|h| !self.inner.cfg.static_peers.contains(h))
+                .count();
+
+            if current_dynamic_peers >= self.inner.cfg.max_peers {
+                debug!(
+                    "Max peers ({}) reached, not adding {}",
+                    self.inner.cfg.max_peers,
+                    hex::encode(destination_hash.as_slice())
+                );
+                return Ok(());
+            }
+
+            // Create new peer
+            let mut peer = LxmPeer::new(destination_hash, self.inner.cfg.default_sync_strategy);
+            peer.set_last_heard(unix_time_f64());
+            peer.set_alive(true);
+            peer.set_peering_cost(peering_cost);
+            peer.set_metadata(metadata);
+            // TODO: Set propagation limits when LxmPeer supports it
+
+            info!(
+                "Added new peer {} (timebase: {}, transfer_limit: {:?}, sync_limit: {:?})",
+                hex::encode(destination_hash.as_slice()),
+                timebase,
+                transfer_limit,
+                sync_limit
+            );
+            peers.insert(destination_hash, peer);
+        }
+
+        Ok(())
+    }
+
+    /// Remove a peering with a propagation node.
+    ///
+    /// This removes the peer from the active peer list. Static peers
+    /// are not removed but marked as inactive.
+    ///
+    /// References Python LXMF/LXMRouter.py unpeer() method
+    pub fn unpeer(&self, destination_hash: &AddressHash) {
+        let mut peers = self.inner.peers.lock().unwrap();
+
+        if self.inner.cfg.static_peers.contains(destination_hash) {
+            // For static peers, mark as not alive but don't remove
+            if let Some(peer) = peers.get_mut(destination_hash) {
+                peer.set_alive(false);
+                debug!(
+                    "Marked static peer {} as inactive",
+                    hex::encode(destination_hash.as_slice())
+                );
+            }
+        } else {
+            // Remove dynamic peers
+            if peers.remove(destination_hash).is_some() {
+                info!("Removed peer {}", hex::encode(destination_hash.as_slice()));
+            }
+        }
+    }
+
+    /// Get a list of all current peer destination hashes.
+    pub fn peer_destinations(&self) -> Vec<AddressHash> {
+        self.inner.peers.lock().unwrap().keys().copied().collect()
+    }
+
+    /// Get the number of active peers.
+    pub fn peer_count(&self) -> usize {
+        self.inner.peers.lock().unwrap().len()
     }
 }
 
