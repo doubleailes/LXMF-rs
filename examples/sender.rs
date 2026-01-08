@@ -1,4 +1,7 @@
-use LXMF_rs::{LXMFDeliveryAnnounceHandler, LXMessage, LxmRouter, RouterConfig, ValidMethod};
+use LXMF_rs::{
+    stamp_cost_from_app_data, LXMessage, LxmRouter, RouterConfig, SharedDeliveryAnnounceHandler,
+    ValidMethod,
+};
 use rand_core::OsRng;
 use reticulum::destination::{DestinationName, SingleInputDestination, SingleOutputDestination};
 use reticulum::hash::AddressHash;
@@ -6,6 +9,7 @@ use reticulum::identity::PrivateIdentity;
 use reticulum::iface::tcp_client::TcpClient;
 use reticulum::transport::{Transport, TransportConfig};
 use std::{env, sync::Arc};
+use tokio::sync::Mutex;
 
 const APP_NAME: &str = "lxmf";
 const DELIVERY_ASPECT: &str = "delivery";
@@ -16,12 +20,19 @@ async fn main() {
 
     let args: Vec<String> = env::args().collect();
 
-    if args.len() > 3 {
-        eprintln!("Usage: {} <32-character-hex-destination> [method]", args[0]);
+    if args.len() < 2 || args.len() > 4 {
         eprintln!(
-            "Example: {} 564f0ec8b6ff3cbbedb3b2bb6069f567 direct",
+            "Usage: {} <32-character-hex-destination> [method] [stamp_cost]",
             args[0]
         );
+        eprintln!(
+            "Example: {} 564f0ec8b6ff3cbbedb3b2bb6069f567 direct 8",
+            args[0]
+        );
+        eprintln!("\nArguments:");
+        eprintln!("  destination: 32-character hex destination hash (required)");
+        eprintln!("  method: 'direct' or 'opportunistic' (optional, default: direct)");
+        eprintln!("  stamp_cost: 0-255 (optional, overrides discovered stamp cost)");
         return;
     }
     let desired_method: Option<ValidMethod> = match args.get(2) {
@@ -31,6 +42,14 @@ async fn main() {
         }
         _ => None,
     };
+
+    // Parse optional stamp cost override from command line
+    let stamp_cost_override: Option<u8> = args.get(3).and_then(|s| {
+        s.parse::<u8>().ok().map(|cost| {
+            log::info!("Using stamp cost override from command line: {}", cost);
+            cost
+        })
+    });
 
     let destination_hex = &args[1];
 
@@ -73,42 +92,124 @@ async fn main() {
         log::error!("Failed to attach transport to router: {}", err);
         return;
     }
+
+    // Create and register the LXMF delivery announce handler.
+    // The handler stores stamp_cost directly in its internal cache when
+    // announces are received, matching Python LXMF behavior.
+    let announce_handler = SharedDeliveryAnnounceHandler::new(router.clone());
+    log::info!(
+        "Registering announce handler with aspect filter: {:?}",
+        announce_handler.aspect_filter()
+    );
+    transport
+        .register_announce_handler(announce_handler.clone())
+        .await;
+
+    // CRITICAL: Subscribe to announces BEFORE spawning the interface!
+    // This prevents a race condition where the announce arrives and is processed
+    // before we have a chance to subscribe to the broadcast channel.
+    // In Reticulum, paths are established via announces - when request_path() is called,
+    // nodes forward their cached announces back to us. The path table is updated
+    // FROM the announce packet itself.
+    let mut announce_rx = transport.recv_announces().await;
+
+    // Now spawn the interface - any announces received will be delivered to our subscriber
     let client_addr = transport.iface_manager().lock().await.spawn(
         TcpClient::new("amsterdam.connect.reticulum.network:4965"),
         TcpClient::spawn,
     );
 
-    // Create and register the LXMF delivery announce handler using the new
-    // register_announce_handler API. This handler will automatically:
-    // - Filter announces matching the "lxmf.delivery" aspect
-    // - Extract stamp_cost from announce app_data
-    // - Cache stamp costs in the router for outbound message preparation
-    let announce_handler = LXMFDeliveryAnnounceHandler::new(router.clone());
-    log::info!(
-        "Registering announce handler with aspect filter: {:?}",
-        announce_handler.aspect_filter
-    );
-    transport.register_announce_handler(announce_handler).await;
+    // Shared stamp cost storage (fallback for when handler doesn't trigger)
+    let discovered_stamp_cost: Arc<Mutex<Option<u8>>> = Arc::new(Mutex::new(None));
+
+    // Spawn a task to listen for announces and extract stamp cost
+    let stamp_cost_clone = discovered_stamp_cost.clone();
+    let target_hash = destination_hash;
+    tokio::spawn(async move {
+        while let Ok(event) = announce_rx.recv().await {
+            let dest = event.destination.lock().await;
+            // Use desc.address_hash (destination hash), NOT identity.address_hash
+            // The destination hash is derived from (app_name + aspect + identity)
+            let announce_hash = dest.desc.address_hash;
+            log::debug!(
+                "recv_announces: received announce from {} with {} bytes app_data",
+                announce_hash,
+                event.app_data.len()
+            );
+
+            // Check if this announce is from our target destination
+            if announce_hash == target_hash {
+                // Extract stamp cost from app_data
+                if let Some(cost) = stamp_cost_from_app_data(event.app_data.as_slice()) {
+                    log::info!(
+                        "recv_announces: discovered stamp cost {} for target destination {}",
+                        cost,
+                        announce_hash
+                    );
+                    *stamp_cost_clone.lock().await = Some(cost);
+                } else {
+                    log::debug!(
+                        "recv_announces: no stamp cost in app_data for {}",
+                        announce_hash
+                    );
+                }
+            }
+        }
+    });
 
     log::info!("Creating and sending LXMessage...");
     log::info!("Waiting for destination announce to discover stamp cost...");
 
+    // Note: In Reticulum, paths are established from announces. When request_path() is called,
+    // intermediate nodes forward their cached announce for that destination. The announce
+    // contains both the routing info (used to populate path table) AND the app_data
+    // (which contains stamp cost for LXMF destinations).
+    //
+    // Therefore, when has_path() returns true, the announce should have already been
+    // received and processed. We check both the handler cache and the direct receiver.
+    let mut announce_wait_iterations = 0;
+    const MAX_ANNOUNCE_WAIT_ITERATIONS: u32 = 50; // 5 seconds after path found
     loop {
-        // The announce handler is registered with the transport and will
-        // automatically process incoming announces in the background.
-        // Give time for announces to be received and processed.
+        // Give time for announces to be received and processed
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Check if stamp cost has been discovered via announce
-        if let Some(cost) = router.get_outbound_stamp_cost(destination_hash) {
-            log::info!(
-                "Stamp cost {} discovered for destination {} via announce handler",
-                cost,
+        if transport.has_path(&destination_hash).await {
+            // Path found - this means an announce was received!
+            // The stamp cost should already be cached from the announce app_data.
+
+            // Try to get stamp cost from handler first, then from direct announce receiver
+            let stamp_cost = announce_handler
+                .get_stamp_cost(&destination_hash)
+                .or(*discovered_stamp_cost.lock().await);
+
+            if stamp_cost.is_some() {
+                log::info!(
+                    "Stamp cost {} discovered for destination {}",
+                    stamp_cost.unwrap(),
+                    destination_hash
+                );
+            } else {
+                // No stamp cost yet - wait a bit more for processing
+                announce_wait_iterations += 1;
+                if announce_wait_iterations < MAX_ANNOUNCE_WAIT_ITERATIONS {
+                    log::debug!(
+                        "Path found but stamp cost not yet cached for {} (waiting {}/{})",
+                        destination_hash,
+                        announce_wait_iterations,
+                        MAX_ANNOUNCE_WAIT_ITERATIONS
+                    );
+                    continue;
+                }
+                log::warn!(
+                    "Timeout waiting for announce from {}. Proceeding without stamp cost.",
+                    destination_hash
+                );
+            }
+
+            log::debug!(
+                "Transport has a path to destination {:?}, preparing message...",
                 destination_hash
             );
-        }
-
-        if transport.has_path(&destination_hash).await {
             let destination_identity =
                 match transport.recall_identity(&destination_hash, false).await {
                     Some(identity) => identity,
@@ -145,11 +246,19 @@ async fn main() {
                 true,
             );
 
-            // Use stamp cost from router's cache (populated by announce handler)
-            let stamp_cost = router.get_outbound_stamp_cost(destination_hash);
+            // Get stamp cost: command-line override > announce handler cache > direct receiver
+            // This matches Python LXMF behavior where stamp_cost is stored in
+            // LXMFDeliveryAnnounceHandler.stamp_costs[destination_hash]
+            let stamp_cost = stamp_cost_override
+                .or_else(|| announce_handler.get_stamp_cost(&destination_hash))
+                .or(*discovered_stamp_cost.lock().await);
 
             if let Some(cost) = stamp_cost {
-                log::info!("Using stamp cost {} (from announce discovery)", cost);
+                if stamp_cost_override.is_some() {
+                    log::info!("Using stamp cost {} (from command-line override)", cost);
+                } else {
+                    log::info!("Using stamp cost {} (from announce)", cost);
+                }
                 message.set_stamp_cost(Some(cost));
             } else {
                 log::warn!(
@@ -197,7 +306,7 @@ async fn main() {
                 "Requested a path for {:?}. Retry once the destination announces itself.",
                 destination_hash
             );
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
         }
     }
 }

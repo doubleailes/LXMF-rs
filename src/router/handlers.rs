@@ -7,7 +7,12 @@
 //! These handlers implement the Reticulum `AnnounceHandler` trait and can be
 //! registered with the transport using `transport.register_announce_handler()`.
 
-use std::{sync::Arc, thread, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
 
 use log::{error, trace, warn};
 use reticulum::{hash::AddressHash, packet::PacketDataBuffer, transport::AnnounceHandler};
@@ -23,8 +28,10 @@ use super::router::{
 ///
 /// Handles incoming announces for the "lxmf.delivery" aspect.
 /// When an announce is received, it:
-/// 1. Extracts the stamp_cost from the app_data and caches it
+/// 1. Extracts the stamp_cost from the app_data and stores it in the handler's cache
 /// 2. Triggers immediate delivery attempts for matching pending outbound messages
+///
+/// The stamp cost cache can be queried using `get_stamp_cost()`.
 ///
 /// References Python LXMF/LXMF.py class LXMFDeliveryAnnounceHandler
 pub struct LXMFDeliveryAnnounceHandler {
@@ -34,6 +41,9 @@ pub struct LXMFDeliveryAnnounceHandler {
     pub receive_path_responses: bool,
     /// Reference to the LXMF router
     lxmrouter: LxmRouter,
+    /// Cache of stamp costs indexed by destination hash
+    /// References Python LXMF/LXMF.py LXMFDeliveryAnnounceHandler.stamp_costs
+    stamp_costs: Arc<Mutex<HashMap<AddressHash, u8>>>,
 }
 
 impl LXMFDeliveryAnnounceHandler {
@@ -43,7 +53,18 @@ impl LXMFDeliveryAnnounceHandler {
             aspect_filter: format!("{}.{}", APP_NAME, DELIVERY_ASPECT),
             receive_path_responses: true,
             lxmrouter,
+            stamp_costs: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Get the stamp cost for a destination from the handler's cache.
+    ///
+    /// Returns `Some(cost)` if a stamp cost has been discovered for this destination
+    /// via an announce, or `None` if no stamp cost is known.
+    ///
+    /// References Python LXMF/LXMF.py LXMFDeliveryAnnounceHandler.stamp_costs
+    pub fn get_stamp_cost(&self, destination_hash: &AddressHash) -> Option<u8> {
+        self.stamp_costs.lock().unwrap().get(destination_hash).copied()
     }
 
     /// Handle a received announce.
@@ -59,26 +80,48 @@ impl LXMFDeliveryAnnounceHandler {
     ///
     /// References Python LXMF/LXMF.py LXMFDeliveryAnnounceHandler.received_announce()
     pub fn received_announce(&self, destination_hash: AddressHash, app_data: &[u8]) {
-        // Extract and cache stamp_cost from app_data
+        log::debug!(
+            "received_announce: processing announce from {} with app_data: {:?}",
+            hex::encode(destination_hash.as_slice()),
+            hex::encode(app_data)
+        );
+
+        // Extract and store stamp_cost from app_data in the handler's cache
+        // References Python LXMF/LXMF.py LXMFDeliveryAnnounceHandler.stamp_costs[destination_hash]
         match std::panic::catch_unwind(|| stamp_cost_from_app_data(app_data)) {
             Ok(stamp_cost_opt) => {
+                log::debug!(
+                    "stamp_cost_from_app_data returned: {:?}",
+                    stamp_cost_opt
+                );
                 if let Some(stamp_cost) = stamp_cost_opt {
+                    // Store in handler's stamp_costs cache
+                    self.stamp_costs
+                        .lock()
+                        .unwrap()
+                        .insert(destination_hash, stamp_cost);
+                    log::info!(
+                        "Stored stamp cost {} for {} in handler cache",
+                        stamp_cost,
+                        hex::encode(destination_hash.as_slice())
+                    );
+
+                    // Also update router's cache for backward compatibility
                     if let Err(e) = self
                         .lxmrouter
                         .update_outbound_stamp_cost(destination_hash, stamp_cost)
                     {
                         error!(
-                            "Failed to update stamp cost for {}: {}",
+                            "Failed to update stamp cost in router for {}: {}",
                             hex::encode(destination_hash.as_slice()),
                             e
                         );
-                    } else {
-                        trace!(
-                            "Updated stamp cost {} for {} from announce",
-                            stamp_cost,
-                            hex::encode(destination_hash.as_slice())
-                        );
                     }
+                } else {
+                    log::debug!(
+                        "No stamp cost found in app_data for {}",
+                        hex::encode(destination_hash.as_slice())
+                    );
                 }
             }
             Err(_) => {
@@ -146,9 +189,10 @@ impl AnnounceHandler for LXMFDeliveryAnnounceHandler {
             dest.desc.address_hash
         };
 
-        trace!(
-            "AnnounceHandler: received delivery announce from {}",
-            hex::encode(destination_hash.as_slice())
+        log::info!(
+            "AnnounceHandler: received delivery announce from {} with {} bytes of app_data",
+            hex::encode(destination_hash.as_slice()),
+            app_data.len()
         );
 
         // Call the existing received_announce method
@@ -161,6 +205,68 @@ impl AnnounceHandler for LXMFDeliveryAnnounceHandler {
 
     fn receive_path_responses(&self) -> bool {
         self.receive_path_responses
+    }
+}
+
+/// A shared, cloneable wrapper for LXMFDeliveryAnnounceHandler.
+///
+/// This wrapper allows the handler to be shared between the registration
+/// with transport and direct queries for stamp_cost.
+///
+/// Usage:
+/// ```ignore
+/// let handler = SharedDeliveryAnnounceHandler::new(router.clone());
+/// transport.register_announce_handler(handler.clone()).await;
+/// // Later, query stamp cost:
+/// let cost = handler.get_stamp_cost(&destination_hash);
+/// ```
+#[derive(Clone)]
+pub struct SharedDeliveryAnnounceHandler {
+    inner: Arc<LXMFDeliveryAnnounceHandler>,
+}
+
+impl SharedDeliveryAnnounceHandler {
+    /// Create a new shared delivery announce handler.
+    pub fn new(lxmrouter: LxmRouter) -> Self {
+        Self {
+            inner: Arc::new(LXMFDeliveryAnnounceHandler::new(lxmrouter)),
+        }
+    }
+
+    /// Get the stamp cost for a destination from the handler's cache.
+    ///
+    /// Returns `Some(cost)` if a stamp cost has been discovered for this destination
+    /// via an announce, or `None` if no stamp cost is known.
+    pub fn get_stamp_cost(&self, destination_hash: &AddressHash) -> Option<u8> {
+        self.inner.get_stamp_cost(destination_hash)
+    }
+
+    /// Get a reference to the underlying router.
+    pub fn router(&self) -> &LxmRouter {
+        self.inner.router()
+    }
+
+    /// Get the aspect filter for this handler.
+    pub fn aspect_filter(&self) -> &str {
+        &self.inner.aspect_filter
+    }
+}
+
+impl AnnounceHandler for SharedDeliveryAnnounceHandler {
+    fn handle_announce(
+        &self,
+        destination: Arc<tokio::sync::Mutex<reticulum::destination::SingleOutputDestination>>,
+        app_data: PacketDataBuffer,
+    ) {
+        self.inner.handle_announce(destination, app_data);
+    }
+
+    fn aspect_filter(&self) -> Option<&str> {
+        self.inner.aspect_filter()
+    }
+
+    fn receive_path_responses(&self) -> bool {
+        self.inner.receive_path_responses()
     }
 }
 
