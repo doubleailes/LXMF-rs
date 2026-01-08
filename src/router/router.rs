@@ -42,7 +42,9 @@ use crate::{
 };
 
 use super::error::RouterError;
-use super::handlers::PropagationNodeAnnounceData;
+use super::handlers::{
+    LXMFDeliveryAnnounceHandler, LXMFPropagationAnnounceHandler, PropagationNodeAnnounceData,
+};
 
 pub const APP_NAME: &str = "lxmf";
 pub const DELIVERY_ASPECT: &str = "delivery";
@@ -743,9 +745,36 @@ impl LxmRouter {
     }
 
     /// Attach a transport using an explicit Tokio runtime handle.
+    ///
+    /// This also registers the LXMF announce handlers with the transport:
+    /// - `LXMFDeliveryAnnounceHandler` for "lxmf.delivery" announces
+    /// - `LXMFPropagationAnnounceHandler` for "lxmf.propagation" announces
+    ///
+    /// References Python LXMF/LXMF.py LXMRouter.__init__() handler registration
     pub fn attach_transport_with_handle(&self, transport: Arc<Transport>, handle: Handle) {
-        *self.inner.transport.lock().unwrap() = Some(transport);
-        *self.inner.runtime_handle.lock().unwrap() = Some(handle);
+        // Store transport and runtime handle
+        *self.inner.transport.lock().unwrap() = Some(transport.clone());
+        *self.inner.runtime_handle.lock().unwrap() = Some(handle.clone());
+
+        // Register announce handlers like Python LXMF does in __init__
+        let delivery_handler = LXMFDeliveryAnnounceHandler::new(self.clone());
+        let propagation_handler = LXMFPropagationAnnounceHandler::new(self.clone());
+
+        handle.spawn({
+            let transport = transport.clone();
+            async move {
+                transport.register_announce_handler(delivery_handler).await;
+            }
+        });
+
+        handle.spawn({
+            let transport = transport.clone();
+            async move {
+                transport.register_announce_handler(propagation_handler).await;
+            }
+        });
+
+        debug!("Registered LXMF announce handlers with transport");
     }
 
     /// Queue an outbound LXMF message for later processing.
