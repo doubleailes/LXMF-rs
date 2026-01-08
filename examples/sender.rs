@@ -78,37 +78,34 @@ async fn main() {
         TcpClient::spawn,
     );
 
-    // Subscribe to announces to receive stamp_cost discovery
-    let mut announce_rx = transport.recv_announces().await;
-
-    // Create the LXMF delivery announce handler
-    // This automatically extracts stamp_cost from announces and caches them in the router
+    // Create and register the LXMF delivery announce handler using the new
+    // register_announce_handler API. This handler will automatically:
+    // - Filter announces matching the "lxmf.delivery" aspect
+    // - Extract stamp_cost from announce app_data
+    // - Cache stamp costs in the router for outbound message preparation
     let announce_handler = LXMFDeliveryAnnounceHandler::new(router.clone());
     log::info!(
-        "Registered announce handler with aspect filter: {}",
+        "Registering announce handler with aspect filter: {:?}",
         announce_handler.aspect_filter
     );
+    transport.register_announce_handler(announce_handler).await;
 
     log::info!("Creating and sending LXMessage...");
     log::info!("Waiting for destination announce to discover stamp cost...");
 
     loop {
-        // Check for incoming announces to discover stamp_cost
-        // The LXMFDeliveryAnnounceHandler handles stamp cost extraction and caching
-        while let Ok(announce_event) = announce_rx.try_recv() {
-            let dest = announce_event.destination.lock().await;
-            let announce_dest_hash = dest.desc.address_hash;
+        // The announce handler is registered with the transport and will
+        // automatically process incoming announces in the background.
+        // Give time for announces to be received and processed.
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-            // Let the handler process the announce (extracts stamp_cost, triggers outbound)
-            let app_data = announce_event.app_data.as_slice();
-            announce_handler.received_announce(announce_dest_hash, app_data);
-
-            if announce_dest_hash == destination_hash {
-                log::info!(
-                    "Received announce from target destination {}",
-                    destination_hash
-                );
-            }
+        // Check if stamp cost has been discovered via announce
+        if let Some(cost) = router.get_outbound_stamp_cost(destination_hash) {
+            log::info!(
+                "Stamp cost {} discovered for destination {} via announce handler",
+                cost,
+                destination_hash
+            );
         }
 
         if transport.has_path(&destination_hash).await {
