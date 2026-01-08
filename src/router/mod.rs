@@ -2,6 +2,7 @@ mod handlers;
 mod router;
 pub use handlers::{
     LXMFDeliveryAnnounceHandler, LXMFPropagationAnnounceHandler, PropagationNodeAnnounceData,
+    SharedDeliveryAnnounceHandler,
 };
 pub use router::{
     APP_NAME, DELIVERY_ASPECT, LxmRouter, PROPAGATION_ASPECT, RouterConfig, STAMP_COST_EXPIRY_S,
