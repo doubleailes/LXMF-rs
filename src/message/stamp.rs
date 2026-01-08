@@ -71,9 +71,10 @@ pub fn generate_stamp<R: RngCore + CryptoRng>(
         }
 
         if let Some(limit) = max_attempts
-            && rounds >= limit {
-                return Err(StampError::Exhausted(rounds));
-            }
+            && rounds >= limit
+        {
+            return Err(StampError::Exhausted(rounds));
+        }
     }
 }
 
@@ -208,10 +209,9 @@ mod tests {
         // Test round 0
         let salt_0 = salt_for_round(&message_id, 0).unwrap();
         let expected_salt_0 = [
-            0x7f, 0x9c, 0x9e, 0x31, 0xac, 0x82, 0x56, 0xca,
-            0x2f, 0x25, 0x85, 0x83, 0xdf, 0x26, 0x2d, 0xbc,
-            0x7d, 0x6f, 0x68, 0xf2, 0xa0, 0x30, 0x43, 0xd5,
-            0xc9, 0x9a, 0x4a, 0xe5, 0xa7, 0x39, 0x6c, 0xe9,
+            0x7f, 0x9c, 0x9e, 0x31, 0xac, 0x82, 0x56, 0xca, 0x2f, 0x25, 0x85, 0x83, 0xdf, 0x26,
+            0x2d, 0xbc, 0x7d, 0x6f, 0x68, 0xf2, 0xa0, 0x30, 0x43, 0xd5, 0xc9, 0x9a, 0x4a, 0xe5,
+            0xa7, 0x39, 0x6c, 0xe9,
         ];
         assert_eq!(
             salt_0, expected_salt_0,
@@ -222,10 +222,9 @@ mod tests {
         // Test round 1
         let salt_1 = salt_for_round(&message_id, 1).unwrap();
         let expected_salt_1 = [
-            0x1f, 0xd4, 0x24, 0x74, 0x43, 0xc9, 0x44, 0x0c,
-            0xb3, 0xc4, 0x8c, 0x28, 0x85, 0x19, 0x37, 0x19,
-            0x6b, 0xc1, 0x56, 0x03, 0x2d, 0x70, 0xa9, 0x6c,
-            0x98, 0xe1, 0x27, 0xec, 0xb3, 0x47, 0xe4, 0x5f,
+            0x1f, 0xd4, 0x24, 0x74, 0x43, 0xc9, 0x44, 0x0c, 0xb3, 0xc4, 0x8c, 0x28, 0x85, 0x19,
+            0x37, 0x19, 0x6b, 0xc1, 0x56, 0x03, 0x2d, 0x70, 0xa9, 0x6c, 0x98, 0xe1, 0x27, 0xec,
+            0xb3, 0x47, 0xe4, 0x5f,
         ];
         assert_eq!(
             salt_1, expected_salt_1,
@@ -250,16 +249,17 @@ mod tests {
 
         // First 32 bytes from Python
         let expected_first_32: [u8; 32] = [
-            0x43, 0x3b, 0x07, 0xee, 0x12, 0xdd, 0xfc, 0xa7,
-            0xb6, 0xf5, 0x40, 0x9d, 0x31, 0x0f, 0xf1, 0x5a,
-            0xc7, 0xff, 0x33, 0x5f, 0xe6, 0xf6, 0x93, 0x8d,
-            0xa6, 0xc2, 0xd8, 0x9f, 0xaf, 0x77, 0xdb, 0x98,
+            0x43, 0x3b, 0x07, 0xee, 0x12, 0xdd, 0xfc, 0xa7, 0xb6, 0xf5, 0x40, 0x9d, 0x31, 0x0f,
+            0xf1, 0x5a, 0xc7, 0xff, 0x33, 0x5f, 0xe6, 0xf6, 0x93, 0x8d, 0xa6, 0xc2, 0xd8, 0x9f,
+            0xaf, 0x77, 0xdb, 0x98,
         ];
 
         assert_eq!(
-            &hkdf_output[..32], &expected_first_32,
+            &hkdf_output[..32],
+            &expected_first_32,
             "HKDF output (first 32 bytes) mismatch.\nRust:   {:02x?}\nPython: {:02x?}",
-            &hkdf_output[..32], &expected_first_32
+            &hkdf_output[..32],
+            &expected_first_32
         );
     }
 
@@ -308,19 +308,38 @@ mod tests {
         let message_id = Hash::new_from_slice(&hashed_part);
 
         // Verify the message_id matches the expected Python value
-        let expected_message_id = "7dab36ed1047be956098ade44e1966b21ce8dd469648e711e43611c90790838f";
-        let actual_message_id: String = message_id.as_slice().iter().map(|b| format!("{:02x}", b)).collect();
-        assert_eq!(actual_message_id, expected_message_id, "Message ID mismatch");
+        let expected_message_id =
+            "7dab36ed1047be956098ade44e1966b21ce8dd469648e711e43611c90790838f";
+        let actual_message_id: String = message_id
+            .as_slice()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        assert_eq!(
+            actual_message_id, expected_message_id,
+            "Message ID mismatch"
+        );
 
         // Generate a valid stamp
         let mut rng = ChaCha12Rng::seed_from_u64(42);
         let target_cost = 8u8;
         let params = StampParameters::default();
-        
-        let result = generate_stamp(&mut rng, message_id.as_slice(), target_cost, params, Some(100_000))
-            .expect("should generate stamp");
-        
-        assert!(result.value >= target_cost as u16, "Stamp value {} is less than target cost {}", result.value, target_cost);
+
+        let result = generate_stamp(
+            &mut rng,
+            message_id.as_slice(),
+            target_cost,
+            params,
+            Some(100_000),
+        )
+        .expect("should generate stamp");
+
+        assert!(
+            result.value >= target_cost as u16,
+            "Stamp value {} is less than target cost {}",
+            result.value,
+            target_cost
+        );
 
         // Now simulate what the Python receiver does:
         // 1. Extract the stamp from the message payload
@@ -332,25 +351,23 @@ mod tests {
         // For this test, we already have the message_id, so just validate the stamp
         let receiver_workblock = stamp_workblock(message_id.as_slice(), params)
             .expect("workblock generation should succeed");
-        
+
         let is_valid = stamp_valid(&result.stamp, target_cost, &receiver_workblock);
         let computed_value = stamp_value(&result.stamp, &receiver_workblock);
 
-        assert!(is_valid, 
+        assert!(
+            is_valid,
             "Stamp validation FAILED!\n\
              Message ID:   {}\n\
              Stamp (hex):  {:02x?}\n\
              Target cost:  {}\n\
              Stamp value:  {}\n\
              Rounds used:  {}",
-            expected_message_id,
-            result.stamp,
-            target_cost,
-            computed_value,
-            result.rounds
+            expected_message_id, result.stamp, target_cost, computed_value, result.rounds
         );
 
-        assert_eq!(result.value, computed_value,
+        assert_eq!(
+            result.value, computed_value,
             "Stamp value mismatch between generation ({}) and validation ({})",
             result.value, computed_value
         );

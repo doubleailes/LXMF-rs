@@ -18,15 +18,19 @@ async fn main() {
 
     if args.len() > 3 {
         eprintln!("Usage: {} <32-character-hex-destination> [method]", args[0]);
-        eprintln!("Example: {} 564f0ec8b6ff3cbbedb3b2bb6069f567 direct", args[0]);
+        eprintln!(
+            "Example: {} 564f0ec8b6ff3cbbedb3b2bb6069f567 direct",
+            args[0]
+        );
         return;
     }
     let desired_method: Option<ValidMethod> = match args.get(2) {
         Some(method_str) if method_str.to_lowercase() == "direct" => Some(ValidMethod::Direct),
-        Some(method_str) if method_str.to_lowercase() == "opportunistic" => Some(ValidMethod::Opportunistic),
+        Some(method_str) if method_str.to_lowercase() == "opportunistic" => {
+            Some(ValidMethod::Opportunistic)
+        }
         _ => None,
     };
-
 
     let destination_hex = &args[1];
 
@@ -69,14 +73,10 @@ async fn main() {
         log::error!("Failed to attach transport to router: {}", err);
         return;
     }
-    let client_addr = transport
-        .iface_manager()
-        .lock()
-        .await
-        .spawn(
-            TcpClient::new("amsterdam.connect.reticulum.network:4965"),
-            TcpClient::spawn,
-        );
+    let client_addr = transport.iface_manager().lock().await.spawn(
+        TcpClient::new("amsterdam.connect.reticulum.network:4965"),
+        TcpClient::spawn,
+    );
 
     // Subscribe to announces to receive stamp_cost discovery
     let mut announce_rx = transport.recv_announces().await;
@@ -168,8 +168,11 @@ async fn main() {
                 let hex_str: String = packed.iter().map(|b| format!("{:02x}", b)).collect();
                 log::debug!("  Packed hex: {}", hex_str);
                 if let Some(hash) = message.message_hash() {
-                    let hash_hex: String =
-                        hash.as_slice().iter().map(|b| format!("{:02x}", b)).collect();
+                    let hash_hex: String = hash
+                        .as_slice()
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
                     log::debug!("  Message hash: {}", hash_hex);
                 }
                 if let Some(stamp) = message.stamp() {

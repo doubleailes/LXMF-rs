@@ -18,8 +18,7 @@ pub const PN_META_NAME: u8 = 0x01;
 pub const TRANSIENT_ID_LEN: usize = 32;
 pub type TransientId = [u8; TRANSIENT_ID_LEN];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PeerState {
     #[default]
     Idle = 0x00,
@@ -29,7 +28,6 @@ pub enum PeerState {
     ResponseReceived = 0x04,
     ResourceTransferring = 0x05,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerErrorCode {

@@ -208,9 +208,7 @@ impl LXMessage {
 
     pub fn pack(&mut self) -> Result<&[u8], MessageError> {
         if self.packed.is_some() {
-            let slice = self
-                .packed.as_deref()
-                .expect("packed present");
+            let slice = self.packed.as_deref().expect("packed present");
             return Ok(slice);
         }
 
@@ -221,8 +219,11 @@ impl LXMessage {
 
         // Python computes hash from payload WITHOUT stamp (see unpack_from_bytes which strips stamp)
         let payload_without_stamp = self.encode_payload_bytes(false)?;
-        let mut hashed_part =
-            hashed_part(&payload_without_stamp, &self.destination_hash, &self.source_hash);
+        let mut hashed_part = hashed_part(
+            &payload_without_stamp,
+            &self.destination_hash,
+            &self.source_hash,
+        );
         let message_hash = Hash::new_from_slice(&hashed_part);
         self.hash = Some(message_hash);
 
@@ -512,10 +513,9 @@ impl LXMessage {
                 .map_err(|e| MessageError::SerializationError(e.to_string()))?;
             write_bin(&mut buf, value)?;
         }
-        if include_stamp_entry
-            && let Some(stamp) = &self.stamp {
-                write_bin(&mut buf, stamp)?;
-            }
+        if include_stamp_entry && let Some(stamp) = &self.stamp {
+            write_bin(&mut buf, stamp)?;
+        }
         Ok(buf)
     }
 
@@ -738,7 +738,6 @@ pub enum ValidMethod {
     Propagated = 0x03,
     Paper = 0x05,
 }
-
 
 impl TryFrom<u8> for ValidMethod {
     type Error = MessageError;
