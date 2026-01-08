@@ -762,7 +762,7 @@ impl LxmRouter {
         let mut map = self.inner.delivery_destinations.lock().unwrap();
         if let Some(dest) = map.get_mut(&destination_hash) {
             if let Some(cost) = stamp_cost
-                && (cost == 0 || cost >= 255)
+                && (cost == 0 || cost == 255)
             {
                 return Err(RouterError::StampCostOutOfRange(cost as u32));
             }
