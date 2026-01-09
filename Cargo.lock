@@ -525,7 +525,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 [[package]]
 name = "reticulum"
 version = "0.1.0"
-source = "git+https://github.com/doubleailes/Reticulum-rs?branch=LXMF#dba1512ac5644daabcfb995eb29eaa871e192c6b"
+source = "git+https://github.com/doubleailes/Reticulum-rs?branch=copilot%2Ffix-link-request-processing#044b4b273cf7f56bbea2fe98e8a6626a377d6b3c"
 dependencies = [
  "aes",
  "cbc",

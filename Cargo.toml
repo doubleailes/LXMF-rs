@@ -21,7 +21,7 @@ thiserror = "1.0"
 
 [dependencies.reticulum]
 git = "https://github.com/doubleailes/Reticulum-rs"
-branch = "LXMF"
+branch = "copilot/fix-link-request-processing"
 
 [[example]]
 name = "sender"

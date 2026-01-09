@@ -22,6 +22,7 @@ use std::{
 use log::{debug, error, info, trace, warn};
 use rand_core::OsRng;
 use reticulum::{
+    destination::link::LinkEvent,
     destination::{DestinationName, SingleInputDestination},
     error::RnsError,
     hash::{ADDRESS_HASH_SIZE, AddressHash},
@@ -749,7 +750,16 @@ impl LxmRouter {
             map.keys().cloned().collect()
         };
 
+        trace!(
+            "Registering {} delivery destinations with transport",
+            destination_hashes.len()
+        );
+
         for hash in destination_hashes {
+            trace!(
+                "Registering delivery destination {} with transport",
+                hex::encode(hash.as_slice())
+            );
             self.ensure_registered_destination(&transport, hash).await?;
         }
 
@@ -769,6 +779,10 @@ impl LxmRouter {
             .get(&destination_hash)
             .and_then(|dest| dest.input_destination.clone())
         {
+            trace!(
+                "Destination {} already registered with transport",
+                hex::encode(destination_hash.as_slice())
+            );
             return Ok(existing);
         }
 
@@ -780,10 +794,27 @@ impl LxmRouter {
             dest.identity.clone()
         };
 
+        debug!(
+            "Registering destination {} with transport (identity: {})",
+            hex::encode(destination_hash.as_slice()),
+            hex::encode(identity.as_identity().verifying_key.as_bytes())
+        );
+
         let mut transport_handle = transport.as_ref().clone();
         let registered = transport_handle
-            .add_destination(identity, DestinationName::new(APP_NAME, DELIVERY_ASPECT))
+            .add_destination(
+                identity.clone(),
+                DestinationName::new(APP_NAME, DELIVERY_ASPECT),
+            )
             .await;
+
+        // Log the actual address hash that was registered
+        let registered_hash = registered.lock().await.desc.address_hash;
+        info!(
+            "Destination registered with transport: expected={}, actual={}",
+            hex::encode(destination_hash.as_slice()),
+            hex::encode(registered_hash.as_slice())
+        );
 
         let mut map = self.inner.delivery_destinations.lock().unwrap();
         let dest = map
@@ -850,11 +881,19 @@ impl LxmRouter {
         self.register_delivery_destinations_with_transport(transport.clone())
             .await?;
 
-        // Start background task to process incoming LXMF messages
+        // Start background task to process incoming LXMF messages (single packets)
         let router = self.clone();
         let transport_clone = transport.clone();
         handle.spawn(async move {
             router.process_incoming_messages(transport_clone).await;
+        });
+
+        // Start background task to process incoming link events (LXMF over links)
+        // This mirrors Python LXMF's delivery_link_established + delivery_packet callbacks
+        let router = self.clone();
+        let transport_clone = transport.clone();
+        handle.spawn(async move {
+            router.process_incoming_link_events(transport_clone).await;
         });
 
         Ok(())
@@ -867,7 +906,15 @@ impl LxmRouter {
     async fn process_incoming_messages(&self, transport: Arc<Transport>) {
         let mut data_receiver = transport.received_data_events();
 
+        trace!("Started listening for incoming data packets");
+
         while let Ok(received_data) = data_receiver.recv().await {
+            trace!(
+                "Received data packet for destination {}: {} bytes",
+                hex::encode(received_data.destination.as_slice()),
+                received_data.data.len()
+            );
+
             // Check if this packet is for one of our delivery destinations
             let delivery_destinations = self.inner.delivery_destinations.lock().unwrap();
             if delivery_destinations.contains_key(&received_data.destination) {
@@ -885,6 +932,125 @@ impl LxmRouter {
                 }
             }
         }
+    }
+
+    /// Process incoming LXMF messages delivered over links.
+    ///
+    /// This mirrors Python LXMF's delivery_link_established() and delivery_packet() callbacks.
+    /// When a link is established to our delivery destination, this handler receives
+    /// data sent over that link and processes it as LXMF messages.
+    ///
+    /// References Python LXMF/LXMF.py:
+    /// - LXMRouter.delivery_link_established() - sets up packet callback on link
+    /// - LXMRouter.delivery_packet() - processes incoming LXMF packets over link
+    async fn process_incoming_link_events(&self, transport: Arc<Transport>) {
+        let mut link_receiver = transport.in_link_events();
+
+        trace!("Started listening for incoming link events");
+
+        while let Ok(link_event_data) = link_receiver.recv().await {
+            trace!(
+                "Received link event: link_id={}, dest={}, event_type={:?}",
+                link_event_data.id,
+                hex::encode(link_event_data.address_hash.as_slice()),
+                match &link_event_data.event {
+                    LinkEvent::Activated => "Activated",
+                    LinkEvent::Data(_) => "Data",
+                    LinkEvent::Closed => "Closed",
+                    LinkEvent::Resource(_) => "Resource",
+                }
+            );
+
+            match link_event_data.event {
+                LinkEvent::Activated => {
+                    log::info!(
+                        "Incoming link {} activated for destination {}",
+                        link_event_data.id,
+                        hex::encode(link_event_data.address_hash.as_slice())
+                    );
+
+                    // Check if this link is for one of our delivery destinations
+                    let delivery_destinations = self.inner.delivery_destinations.lock().unwrap();
+                    if delivery_destinations.contains_key(&link_event_data.address_hash) {
+                        log::debug!(
+                            "Link {} is for registered LXMF delivery destination",
+                            link_event_data.id
+                        );
+                    }
+                }
+                LinkEvent::Data(payload) => {
+                    // Check if this link is for one of our delivery destinations
+                    let delivery_destinations = self.inner.delivery_destinations.lock().unwrap();
+                    if delivery_destinations.contains_key(&link_event_data.address_hash) {
+                        drop(delivery_destinations);
+
+                        log::debug!(
+                            "Received LXMF data over link {} for destination {}: {} bytes",
+                            link_event_data.id,
+                            hex::encode(link_event_data.address_hash.as_slice()),
+                            payload.len()
+                        );
+
+                        // Process the LXMF message from link data
+                        // For link delivery, the payload contains the full LXMF message
+                        // (destination hash prepended, like single packet delivery)
+                        if let Err(e) = self.process_inbound_lxmf_link_data(
+                            link_event_data.address_hash,
+                            payload.as_slice(),
+                        ) {
+                            log::error!("Error processing LXMF link data: {}", e);
+                        }
+                    }
+                }
+                LinkEvent::Closed => {
+                    log::debug!("Link {} closed", link_event_data.id);
+                }
+                LinkEvent::Resource(_) => {
+                    // TODO: Handle resource transfers over links
+                    // This is used for larger LXMF messages that don't fit in a single packet
+                    log::debug!(
+                        "Link {} resource event (not yet implemented)",
+                        link_event_data.id
+                    );
+                }
+            }
+        }
+    }
+
+    /// Process inbound LXMF data received over a link.
+    ///
+    /// References Python LXMF/LXMF.py LXMRouter.delivery_packet()
+    fn process_inbound_lxmf_link_data(
+        &self,
+        destination_hash: AddressHash,
+        payload: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use reticulum::hash::ADDRESS_HASH_SIZE;
+
+        // For link delivery, we reconstruct the full LXMF bytes by prepending destination hash
+        // (same as single packet delivery - the destination hash identifies the recipient)
+        let mut lxmf_bytes = Vec::with_capacity(ADDRESS_HASH_SIZE + payload.len());
+        lxmf_bytes.extend_from_slice(destination_hash.as_slice());
+        lxmf_bytes.extend_from_slice(payload);
+
+        log::debug!(
+            "Unpacking LXMF message from link ({} bytes)",
+            lxmf_bytes.len()
+        );
+
+        // Unpack the LXMF message
+        let message = LXMessage::unpack_from_bytes(&lxmf_bytes)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+
+        log::info!(
+            "Successfully unpacked LXMF message from {} (via link)",
+            hex::encode(message.source_hash().as_slice())
+        );
+
+        // Trigger the delivery callback
+        self.trigger_delivery_callback(&message);
+
+        Ok(())
     }
 
     /// Process an inbound LXMF packet.
@@ -967,6 +1133,24 @@ impl LxmRouter {
                 {
                     error!("Failed to register delivery destinations: {}", err);
                 }
+            }
+        });
+
+        // Start background task to process incoming LXMF messages (single packets)
+        handle.spawn({
+            let router = self.clone();
+            let transport = transport.clone();
+            async move {
+                router.process_incoming_messages(transport).await;
+            }
+        });
+
+        // Start background task to process incoming link events (LXMF over links)
+        handle.spawn({
+            let router = self.clone();
+            let transport = transport.clone();
+            async move {
+                router.process_incoming_link_events(transport).await;
             }
         });
 

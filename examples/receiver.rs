@@ -155,6 +155,27 @@ async fn main() {
     // The router's attach_transport already set up incoming message handling
     // via the process_incoming_messages background task
 
+    // Add diagnostic logging for ALL raw interface packets
+    // This helps debug why link requests might not be reaching the transport handler
+    {
+        let mut iface_rx = transport.iface_rx();
+        tokio::spawn(async move {
+            log::info!("Started raw interface packet monitor");
+            while let Ok(rx_message) = iface_rx.recv().await {
+                let packet = &rx_message.packet;
+                log::trace!(
+                    "RAW IFACE RX: iface={}, dest={}, type={:?}, ctx={:?}, hops={}, data_len={}",
+                    rx_message.address,
+                    packet.destination,
+                    packet.header.packet_type,
+                    packet.context,
+                    packet.header.hops,
+                    packet.data.len()
+                );
+            }
+        });
+    }
+
     // Interactive loop - press Enter to announce
     log::info!("\nPress Enter to announce delivery destination...");
     log::info!("Press Ctrl+C to exit\n");
