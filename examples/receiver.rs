@@ -86,7 +86,7 @@ fn format_timestamp(timestamp: f64) -> String {
 #[tokio::main]
 async fn main() {
     // Initialize logging
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace")).init();
 
     log::info!("LXMF Receiver Example");
     log::info!("=====================");
@@ -145,6 +145,12 @@ async fn main() {
         .spawn(TcpClient::new("127.0.0.1:4242"), TcpClient::spawn);
 
     log::info!("Connected to Reticulum network");
+
+    // Send an initial announce so peers can discover us immediately
+    match router.announce(my_lxmf_destination).await {
+        Ok(()) => log::info!("Initial announce sent automatically"),
+        Err(err) => log::error!("Failed to send initial announce: {}", err),
+    }
 
     // The router's attach_transport already set up incoming message handling
     // via the process_incoming_messages background task

@@ -22,7 +22,7 @@ use std::{
 use log::{debug, error, info, trace, warn};
 use rand_core::OsRng;
 use reticulum::{
-    destination::{DestinationName, SingleOutputDestination},
+    destination::{DestinationName, SingleInputDestination},
     error::RnsError,
     hash::{ADDRESS_HASH_SIZE, AddressHash},
     identity::PrivateIdentity,
@@ -395,7 +395,7 @@ impl RouterPaths {
 
 struct DeliveryDestination {
     identity: PrivateIdentity,
-    destination: SingleOutputDestination,
+    input_destination: Option<Arc<tokio::sync::Mutex<SingleInputDestination>>>,
     display_name: Option<String>,
     inbound_stamp_cost: Option<u8>,
 }
@@ -637,26 +637,31 @@ impl LxmRouter {
         stamp_cost: Option<u8>,
     ) -> Result<AddressHash, RouterError> {
         let identity = identity.unwrap_or_else(|| self.inner.identity.clone());
-        let destination = SingleOutputDestination::new(
-            *identity.as_identity(),
+        let dest_hash = SingleInputDestination::new(
+            identity.clone(),
             DestinationName::new(APP_NAME, DELIVERY_ASPECT),
-        );
-        let dest_hash = destination.desc.address_hash;
+        )
+        .desc
+        .address_hash;
 
-        let mut map = self.inner.delivery_destinations.lock().unwrap();
-        if !map.is_empty() {
-            return Err(RouterError::DuplicateDeliveryIdentity);
+        {
+            let mut map = self.inner.delivery_destinations.lock().unwrap();
+            if !map.is_empty() {
+                return Err(RouterError::DuplicateDeliveryIdentity);
+            }
+
+            map.insert(
+                dest_hash,
+                DeliveryDestination {
+                    identity,
+                    input_destination: None,
+                    display_name,
+                    inbound_stamp_cost: stamp_cost,
+                },
+            );
         }
 
-        map.insert(
-            dest_hash,
-            DeliveryDestination {
-                identity,
-                destination,
-                display_name,
-                inbound_stamp_cost: stamp_cost,
-            },
-        );
+        self.spawn_destination_registration(dest_hash);
 
         Ok(dest_hash)
     }
@@ -719,23 +724,9 @@ impl LxmRouter {
             .clone()
             .ok_or(RouterError::NoTransportAttached)?;
 
-        // Get the identity to create an input destination for announcing
-        let input_destination = {
-            let map = self.inner.delivery_destinations.lock().unwrap();
-            let dest = map.get(&destination_hash).ok_or({
-                RouterError::InvalidHashLength {
-                    expected: ADDRESS_HASH_SIZE,
-                    got: 0,
-                }
-            })?;
-
-            // Create a SingleInputDestination from the stored identity
-            let input_dest = reticulum::destination::SingleInputDestination::new(
-                dest.identity.clone(),
-                DestinationName::new(APP_NAME, DELIVERY_ASPECT),
-            );
-            Arc::new(tokio::sync::Mutex::new(input_dest))
-        };
+        let input_destination = self
+            .ensure_registered_destination(&transport, destination_hash)
+            .await?;
 
         let app_data = self.get_announce_app_data(destination_hash);
         transport
@@ -747,6 +738,84 @@ impl LxmRouter {
             hex::encode(destination_hash.as_slice())
         );
         Ok(())
+    }
+
+    async fn register_delivery_destinations_with_transport(
+        &self,
+        transport: Arc<Transport>,
+    ) -> Result<(), RouterError> {
+        let destination_hashes: Vec<AddressHash> = {
+            let map = self.inner.delivery_destinations.lock().unwrap();
+            map.keys().cloned().collect()
+        };
+
+        for hash in destination_hashes {
+            self.ensure_registered_destination(&transport, hash).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_registered_destination(
+        &self,
+        transport: &Arc<Transport>,
+        destination_hash: AddressHash,
+    ) -> Result<Arc<tokio::sync::Mutex<SingleInputDestination>>, RouterError> {
+        if let Some(existing) = self
+            .inner
+            .delivery_destinations
+            .lock()
+            .unwrap()
+            .get(&destination_hash)
+            .and_then(|dest| dest.input_destination.clone())
+        {
+            return Ok(existing);
+        }
+
+        let identity = {
+            let map = self.inner.delivery_destinations.lock().unwrap();
+            let dest = map
+                .get(&destination_hash)
+                .ok_or(RouterError::UnknownDeliveryDestination(destination_hash))?;
+            dest.identity.clone()
+        };
+
+        let mut transport_handle = transport.as_ref().clone();
+        let registered = transport_handle
+            .add_destination(identity, DestinationName::new(APP_NAME, DELIVERY_ASPECT))
+            .await;
+
+        let mut map = self.inner.delivery_destinations.lock().unwrap();
+        let dest = map
+            .get_mut(&destination_hash)
+            .ok_or(RouterError::UnknownDeliveryDestination(destination_hash))?;
+        dest.input_destination = Some(registered.clone());
+        Ok(registered)
+    }
+
+    fn spawn_destination_registration(&self, destination_hash: AddressHash) {
+        let transport = { self.inner.transport.lock().unwrap().clone() };
+        let Some(transport) = transport else {
+            return;
+        };
+
+        let Some(handle) = self.inner.runtime_handle.lock().unwrap().clone() else {
+            return;
+        };
+
+        let router = self.clone();
+        handle.spawn(async move {
+            if let Err(err) = router
+                .ensure_registered_destination(&transport, destination_hash)
+                .await
+            {
+                warn!(
+                    "Failed to register delivery destination {}: {}",
+                    hex::encode(destination_hash.as_slice()),
+                    err
+                );
+            }
+        });
     }
 
     /// Attach a Reticulum transport so queued LXMs can be forwarded automatically.
@@ -777,6 +846,9 @@ impl LxmRouter {
             .await;
 
         debug!("Registered LXMF announce handlers with transport");
+
+        self.register_delivery_destinations_with_transport(transport.clone())
+            .await?;
 
         // Start background task to process incoming LXMF messages
         let router = self.clone();
@@ -885,6 +957,19 @@ impl LxmRouter {
             }
         });
 
+        handle.spawn({
+            let router = self.clone();
+            let transport = transport.clone();
+            async move {
+                if let Err(err) = router
+                    .register_delivery_destinations_with_transport(transport)
+                    .await
+                {
+                    error!("Failed to register delivery destinations: {}", err);
+                }
+            }
+        });
+
         debug!("Registered LXMF announce handlers with transport");
     }
 
@@ -922,10 +1007,7 @@ impl LxmRouter {
             dest.inbound_stamp_cost = stamp_cost;
             Ok(())
         } else {
-            Err(RouterError::InvalidHashLength {
-                expected: ADDRESS_HASH_SIZE,
-                got: destination_hash.as_slice().len(),
-            })
+            Err(RouterError::UnknownDeliveryDestination(destination_hash))
         }
     }
 
