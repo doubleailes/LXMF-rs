@@ -827,29 +827,29 @@ impl LxmRouter {
         // The received data should be an LXMF message payload
         // For Direct/Opportunistic delivery, the destination hash is already stripped by transport
         // We need to reconstruct the full LXMF bytes by prepending the destination hash
-        
+
         let destination_hash = received_data.destination;
         let payload = received_data.data.as_slice();
-        
+
         // Reconstruct full LXMF message bytes: destination_hash + payload
         let mut lxmf_bytes = Vec::with_capacity(ADDRESS_HASH_SIZE + payload.len());
         lxmf_bytes.extend_from_slice(destination_hash.as_slice());
         lxmf_bytes.extend_from_slice(payload);
-        
+
         log::debug!("Unpacking LXMF message ({} bytes)", lxmf_bytes.len());
-        
+
         // Unpack the LXMF message
         let message = LXMessage::unpack_from_bytes(&lxmf_bytes)
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
-        
+
         log::info!(
             "Successfully unpacked LXMF message from {}",
             hex::encode(message.source_hash().as_slice())
         );
-        
+
         // Trigger the delivery callback
         self.trigger_delivery_callback(&message);
-        
+
         Ok(())
     }
 

@@ -44,20 +44,27 @@ fn delivery_callback(message: &LXMessage) {
     );
     log::info!(
         "\t| Transport Encryption   : {}",
-        message
-            .transport_encryption()
-            .unwrap_or("None")
+        message.transport_encryption().unwrap_or("None")
     );
     log::info!("\t| Timestamp              : {}", time_string);
     log::info!(
         "\t| Title                  : {}",
-        message.payload().title_as_string().unwrap_or_else(|_| "<invalid UTF-8>".to_string())
+        message
+            .payload()
+            .title_as_string()
+            .unwrap_or_else(|_| "<invalid UTF-8>".to_string())
     );
     log::info!(
         "\t| Content                : {}",
-        message.payload().content_as_string().unwrap_or_else(|_| "<invalid UTF-8>".to_string())
+        message
+            .payload()
+            .content_as_string()
+            .unwrap_or_else(|_| "<invalid UTF-8>".to_string())
     );
-    log::info!("\t| Fields                 : {:?}", message.payload().fields);
+    log::info!(
+        "\t| Fields                 : {:?}",
+        message.payload().fields
+    );
     log::info!("\t| Message signature      : {}", signature_string);
     log::info!("\t| Stamp                  : {}", stamp_string);
     log::info!("\t+---------------------------------------------------------------");
@@ -66,17 +73,14 @@ fn delivery_callback(message: &LXMessage) {
 fn format_timestamp(timestamp: f64) -> String {
     // Simple formatting - in production you'd use chrono or time crate
     let secs_since_epoch = timestamp as u64;
-    
+
     // Basic date formatting
     let days = secs_since_epoch / 86400;
     let hours = (secs_since_epoch % 86400) / 3600;
     let minutes = (secs_since_epoch % 3600) / 60;
     let seconds = secs_since_epoch % 60;
-    
-    format!(
-        "{} days {:02}:{:02}:{:02}",
-        days, hours, minutes, seconds
-    )
+
+    format!("{} days {:02}:{:02}:{:02}", days, hours, minutes, seconds)
 }
 
 #[tokio::main]
@@ -90,7 +94,7 @@ async fn main() {
     // Create router with storage path
     let mut router_config = RouterConfig::new("/tmp/lxmf_receiver");
     router_config.enforce_stamps = ENFORCE_STAMPS;
-    
+
     // Create a new identity for this receiver
     let mut rng = OsRng;
     let identity = PrivateIdentity::new_from_rand(&mut rng);
@@ -106,17 +110,14 @@ async fn main() {
 
     // Register delivery identity with display name and stamp cost
     let display_name = Some("Anonymous Peer".to_string());
-    let my_lxmf_destination = match router.register_delivery_identity(
-        None,
-        display_name,
-        Some(REQUIRED_STAMP_COST),
-    ) {
-        Ok(dest_hash) => dest_hash,
-        Err(err) => {
-            log::error!("Could not register delivery identity: {}", err);
-            return;
-        }
-    };
+    let my_lxmf_destination =
+        match router.register_delivery_identity(None, display_name, Some(REQUIRED_STAMP_COST)) {
+            Ok(dest_hash) => dest_hash,
+            Err(err) => {
+                log::error!("Could not register delivery identity: {}", err);
+                return;
+            }
+        };
 
     // Register delivery callback
     router.register_delivery_callback(delivery_callback);
@@ -137,10 +138,11 @@ async fn main() {
     log::info!("Attached transport to router - incoming message handling is active");
 
     // Spawn the network interface
-    let _client_addr = transport.iface_manager().lock().await.spawn(
-        TcpClient::new("amsterdam.connect.reticulum.network:4965"),
-        TcpClient::spawn,
-    );
+    let _client_addr = transport
+        .iface_manager()
+        .lock()
+        .await
+        .spawn(TcpClient::new("127.0.0.1:4242"), TcpClient::spawn);
 
     log::info!("Connected to Reticulum network");
 
