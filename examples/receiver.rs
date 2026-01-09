@@ -1,14 +1,10 @@
 use LXMF_rs::{LXMessage, LxmRouter, RouterConfig};
 use rand_core::OsRng;
-use reticulum::destination::DestinationName;
 use reticulum::identity::PrivateIdentity;
 use reticulum::iface::tcp_client::TcpClient;
-use reticulum::transport::{ReceivedData, Transport, TransportConfig};
+use reticulum::transport::{Transport, TransportConfig};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
-
-const APP_NAME: &str = "lxmf";
-const DELIVERY_ASPECT: &str = "delivery";
 
 // Configuration - mirrors Python example settings
 const REQUIRED_STAMP_COST: u8 = 8;
@@ -146,18 +142,7 @@ async fn main() {
         return;
     }
 
-    // Create a delivery destination for receiving
-    // Since we're using broadcast events, we don't need to register it with transport handler directly
-    let delivery_destination = reticulum::destination::SingleInputDestination::new(
-        identity.clone(),
-        DestinationName::new(APP_NAME, DELIVERY_ASPECT),
-    );
-    let delivery_destination_hash = delivery_destination.desc.address_hash;
-
-    log::info!(
-        "Created delivery destination: {}",
-        hex::encode(delivery_destination_hash.as_slice())
-    );
+    log::info!("Attached transport to router - incoming message handling is active");
 
     // Spawn the network interface
     let _client_addr = transport.iface_manager().lock().await.spawn(
@@ -167,28 +152,8 @@ async fn main() {
 
     log::info!("Connected to Reticulum network");
 
-    // Subscribe to received data events
-    let mut data_receiver = transport.received_data_events();
-
-    // Spawn task to handle incoming LXMF messages
-    let router_clone = router.clone();
-    let destination_hash = my_lxmf_destination;
-    tokio::spawn(async move {
-        while let Ok(received_data) = data_receiver.recv().await {
-            // Check if this packet is for our LXMF delivery destination
-            if received_data.destination == destination_hash {
-                log::debug!(
-                    "Received packet for our LXMF destination: {} bytes",
-                    received_data.data.len()
-                );
-                
-                // Process the LXMF message
-                if let Err(e) = process_lxmf_packet(&router_clone, received_data) {
-                    log::error!("Error processing LXMF packet: {}", e);
-                }
-            }
-        }
-    });
+    // The router's attach_transport already set up incoming message handling
+    // via the process_incoming_messages background task
 
     // Interactive loop - press Enter to announce
     log::info!("\nPress Enter to announce delivery destination...");
@@ -224,41 +189,4 @@ async fn main() {
     if let Err(e) = router.shutdown() {
         log::error!("Error shutting down router: {}", e);
     }
-}
-
-/// Process an incoming LXMF packet
-fn process_lxmf_packet(
-    router: &LxmRouter,
-    received_data: ReceivedData,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // The received data should be an LXMF message
-    // For Direct/Opportunistic delivery, the destination hash is already stripped by transport
-    // We need to reconstruct the full LXMF bytes by prepending the destination hash
-    
-    let destination_hash = received_data.destination;
-    let payload = received_data.data.as_slice();
-    
-    // Reconstruct full LXMF message bytes: destination_hash + payload
-    let mut lxmf_bytes = Vec::with_capacity(destination_hash.as_slice().len() + payload.len());
-    lxmf_bytes.extend_from_slice(destination_hash.as_slice());
-    lxmf_bytes.extend_from_slice(payload);
-    
-    log::debug!("Unpacking LXMF message ({} bytes)", lxmf_bytes.len());
-    
-    // Unpack the LXMF message
-    let message = match LXMessage::unpack_from_bytes(&lxmf_bytes) {
-        Ok(msg) => msg,
-        Err(e) => {
-            log::error!("Failed to unpack LXMF message: {}", e);
-            return Err(Box::new(e));
-        }
-    };
-    
-    log::info!("Successfully unpacked LXMF message from {}", 
-        hex::encode(message.source_hash().as_slice()));
-    
-    // Trigger the delivery callback
-    router.trigger_delivery_callback(&message);
-    
-    Ok(())
 }

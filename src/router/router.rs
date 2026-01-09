@@ -755,6 +755,9 @@ impl LxmRouter {
     /// - `LXMFDeliveryAnnounceHandler` for "lxmf.delivery" announces
     /// - `LXMFPropagationAnnounceHandler` for "lxmf.propagation" announces
     ///
+    /// Additionally, this registers all delivery destinations with the transport
+    /// so they can receive incoming LXMF messages.
+    ///
     /// References Python LXMF/LXMF.py LXMRouter.__init__() handler registration
     pub async fn attach_transport(&self, transport: Arc<Transport>) -> Result<(), RouterError> {
         let handle = Handle::try_current()
@@ -762,7 +765,7 @@ impl LxmRouter {
 
         // Store transport and runtime handle
         *self.inner.transport.lock().unwrap() = Some(transport.clone());
-        *self.inner.runtime_handle.lock().unwrap() = Some(handle);
+        *self.inner.runtime_handle.lock().unwrap() = Some(handle.clone());
 
         // Register announce handlers like Python LXMF does in __init__
         let delivery_handler = LXMFDeliveryAnnounceHandler::new(self.clone());
@@ -774,6 +777,79 @@ impl LxmRouter {
             .await;
 
         debug!("Registered LXMF announce handlers with transport");
+
+        // Start background task to process incoming LXMF messages
+        let router = self.clone();
+        let transport_clone = transport.clone();
+        handle.spawn(async move {
+            router.process_incoming_messages(transport_clone).await;
+        });
+
+        Ok(())
+    }
+
+    /// Process incoming LXMF messages from the transport.
+    ///
+    /// This method subscribes to the transport's received_data events and processes
+    /// any packets destined for registered LXMF delivery destinations.
+    async fn process_incoming_messages(&self, transport: Arc<Transport>) {
+        let mut data_receiver = transport.received_data_events();
+
+        while let Ok(received_data) = data_receiver.recv().await {
+            // Check if this packet is for one of our delivery destinations
+            let delivery_destinations = self.inner.delivery_destinations.lock().unwrap();
+            if delivery_destinations.contains_key(&received_data.destination) {
+                drop(delivery_destinations);
+
+                log::debug!(
+                    "Received LXMF packet for destination {}: {} bytes",
+                    hex::encode(received_data.destination.as_slice()),
+                    received_data.data.len()
+                );
+
+                // Process the LXMF message
+                if let Err(e) = self.process_inbound_lxmf_packet(received_data) {
+                    log::error!("Error processing LXMF packet: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Process an inbound LXMF packet.
+    ///
+    /// Unpacks the LXMF message and triggers the delivery callback.
+    fn process_inbound_lxmf_packet(
+        &self,
+        received_data: reticulum::transport::ReceivedData,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use reticulum::hash::ADDRESS_HASH_SIZE;
+
+        // The received data should be an LXMF message payload
+        // For Direct/Opportunistic delivery, the destination hash is already stripped by transport
+        // We need to reconstruct the full LXMF bytes by prepending the destination hash
+        
+        let destination_hash = received_data.destination;
+        let payload = received_data.data.as_slice();
+        
+        // Reconstruct full LXMF message bytes: destination_hash + payload
+        let mut lxmf_bytes = Vec::with_capacity(ADDRESS_HASH_SIZE + payload.len());
+        lxmf_bytes.extend_from_slice(destination_hash.as_slice());
+        lxmf_bytes.extend_from_slice(payload);
+        
+        log::debug!("Unpacking LXMF message ({} bytes)", lxmf_bytes.len());
+        
+        // Unpack the LXMF message
+        let message = LXMessage::unpack_from_bytes(&lxmf_bytes)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+        
+        log::info!(
+            "Successfully unpacked LXMF message from {}",
+            hex::encode(message.source_hash().as_slice())
+        );
+        
+        // Trigger the delivery callback
+        self.trigger_delivery_callback(&message);
+        
         Ok(())
     }
 
