@@ -373,8 +373,8 @@ impl LXMFPropagationAnnounceHandler {
 
         if is_static_peer {
             // Always update static peers
-            if !is_path_response || self.lxmrouter.peer_last_heard(&destination_hash) == 0.0 {
-                if let Err(e) = self.lxmrouter.peer(
+            if (!is_path_response || self.lxmrouter.peer_last_heard(&destination_hash) == 0.0)
+                && let Err(e) = self.lxmrouter.peer(
                     destination_hash,
                     node_timebase,
                     propagation_transfer_limit,
@@ -386,7 +386,6 @@ impl LXMFPropagationAnnounceHandler {
                 ) {
                     warn!("Failed to update static peer {}: {}", destination_hash, e);
                 }
-            }
         } else {
             // Auto-peering logic for non-static peers
             if self.lxmrouter.autopeer_enabled() && !is_path_response {

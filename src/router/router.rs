@@ -223,11 +223,10 @@ pub fn pn_announce_data_is_valid(app_data: &[u8]) -> Option<PropagationNodeAnnou
         rmpv::Value::Map(map) => {
             let mut result = indexmap::IndexMap::new();
             for (k, v) in map {
-                if let (rmpv::Value::Integer(key), rmpv::Value::Binary(val)) = (k, v) {
-                    if let Some(key_u8) = key.as_u64().and_then(|n| u8::try_from(n).ok()) {
+                if let (rmpv::Value::Integer(key), rmpv::Value::Binary(val)) = (k, v)
+                    && let Some(key_u8) = key.as_u64().and_then(|n| u8::try_from(n).ok()) {
                         result.insert(key_u8, val.clone());
                     }
-                }
             }
             if result.is_empty() {
                 None
@@ -1493,8 +1492,8 @@ impl LxmRouter {
         timebase: f64,
         transfer_limit: Option<f64>,
         sync_limit: Option<f64>,
-        stamp_cost: Option<u32>,
-        stamp_flexibility: Option<u32>,
+        _stamp_cost: Option<u32>,
+        _stamp_flexibility: Option<u32>,
         peering_cost: Option<u32>,
         metadata: Option<PeerMetadata>,
     ) -> Result<(), RouterError> {
