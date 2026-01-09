@@ -525,7 +525,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 [[package]]
 name = "reticulum"
 version = "0.1.0"
-source = "git+https://github.com/doubleailes/Reticulum-rs?branch=copilot%2Fremove-full-name-handling#077841e7cce37ef8197da1ff77ba4f7c636e455b"
+source = "git+https://github.com/doubleailes/Reticulum-rs?branch=LXMF#dba1512ac5644daabcfb995eb29eaa871e192c6b"
 dependencies = [
  "aes",
  "cbc",
