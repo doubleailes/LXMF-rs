@@ -737,18 +737,37 @@ impl LxmRouter {
     }
 
     /// Attach a Reticulum transport so queued LXMs can be forwarded automatically.
-    pub fn attach_transport(&self, transport: Arc<Transport>) -> Result<(), RouterError> {
-        let handle = Handle::try_current()
-            .map_err(|err| RouterError::RuntimeUnavailable(err.to_string()))?;
-        self.attach_transport_with_handle(transport, handle);
-        Ok(())
-    }
-
-    /// Attach a transport using an explicit Tokio runtime handle.
     ///
     /// This also registers the LXMF announce handlers with the transport:
     /// - `LXMFDeliveryAnnounceHandler` for "lxmf.delivery" announces
     /// - `LXMFPropagationAnnounceHandler` for "lxmf.propagation" announces
+    ///
+    /// References Python LXMF/LXMF.py LXMRouter.__init__() handler registration
+    pub async fn attach_transport(&self, transport: Arc<Transport>) -> Result<(), RouterError> {
+        let handle = Handle::try_current()
+            .map_err(|err| RouterError::RuntimeUnavailable(err.to_string()))?;
+
+        // Store transport and runtime handle
+        *self.inner.transport.lock().unwrap() = Some(transport.clone());
+        *self.inner.runtime_handle.lock().unwrap() = Some(handle);
+
+        // Register announce handlers like Python LXMF does in __init__
+        let delivery_handler = LXMFDeliveryAnnounceHandler::new(self.clone());
+        let propagation_handler = LXMFPropagationAnnounceHandler::new(self.clone());
+
+        transport.register_announce_handler(delivery_handler).await;
+        transport
+            .register_announce_handler(propagation_handler)
+            .await;
+
+        debug!("Registered LXMF announce handlers with transport");
+        Ok(())
+    }
+
+    /// Attach a transport using an explicit Tokio runtime handle (sync version).
+    ///
+    /// This spawns handler registration asynchronously without waiting.
+    /// For guaranteed handler registration before use, prefer `attach_transport()`.
     ///
     /// References Python LXMF/LXMF.py LXMRouter.__init__() handler registration
     pub fn attach_transport_with_handle(&self, transport: Arc<Transport>, handle: Handle) {
@@ -757,6 +776,7 @@ impl LxmRouter {
         *self.inner.runtime_handle.lock().unwrap() = Some(handle.clone());
 
         // Register announce handlers like Python LXMF does in __init__
+        // NOTE: This spawns asynchronously, handlers may not be registered immediately
         let delivery_handler = LXMFDeliveryAnnounceHandler::new(self.clone());
         let propagation_handler = LXMFPropagationAnnounceHandler::new(self.clone());
 
@@ -770,7 +790,9 @@ impl LxmRouter {
         handle.spawn({
             let transport = transport.clone();
             async move {
-                transport.register_announce_handler(propagation_handler).await;
+                transport
+                    .register_announce_handler(propagation_handler)
+                    .await;
             }
         });
 
@@ -1144,10 +1166,18 @@ impl LxmRouter {
         &self,
         message: &mut LXMessage,
     ) -> Result<(), OutboundPreparationError> {
-        if message.stamp_cost().is_none()
-            && let Some(cost) = self.get_outbound_stamp_cost(message.destination_hash())
-        {
-            message.set_stamp_cost(Some(cost));
+        let dest_hash = message.destination_hash();
+
+        if message.stamp_cost().is_none() {
+            if let Some(cost) = self.get_outbound_stamp_cost(dest_hash) {
+                info!(
+                    "Auto-applied stamp cost {} from router cache for {}",
+                    cost, dest_hash
+                );
+                message.set_stamp_cost(Some(cost));
+            } else {
+                debug!("No cached stamp cost found for {}", dest_hash);
+            }
         }
 
         message.pack().map_err(OutboundPreparationError::Message)?;
