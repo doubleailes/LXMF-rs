@@ -1,5 +1,5 @@
 mod message;
-pub use message::{LXMessage, ValidMethod};
+pub use message::{LXMessage, UnverifiedReason, ValidMethod};
 mod peer;
 pub use peer::{LxmPeer, PeerError, PeerMetadata, SyncStrategy};
 pub mod router;

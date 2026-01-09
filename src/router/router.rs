@@ -668,6 +668,19 @@ impl LxmRouter {
         *self.inner.delivery_callback.lock().unwrap() = Some(Arc::new(callback));
     }
 
+    /// Trigger the delivery callback with a received message.
+    ///
+    /// This should be called when an LXMF message is received for a registered
+    /// delivery destination. It will invoke the callback registered via
+    /// `register_delivery_callback()`.
+    pub fn trigger_delivery_callback(&self, message: &LXMessage) {
+        if let Some(callback) = self.inner.delivery_callback.lock().unwrap().as_ref() {
+            callback(message);
+        } else {
+            log::warn!("No delivery callback registered");
+        }
+    }
+
     /// Build the announce app_data for a delivery destination.
     ///
     /// Format matches Python LXMF 0.5.0+: msgpack array [display_name, stamp_cost]

@@ -206,6 +206,20 @@ impl LXMessage {
         self.packed_size
     }
 
+    pub fn signature_validated(&self) -> bool {
+        self.signature_validated
+    }
+
+    pub fn unverified_reason(&self) -> Option<UnverifiedReason> {
+        self.unverified_reason
+    }
+
+    pub fn stamp_valid(&self) -> bool {
+        // TODO: Implement actual stamp validation logic
+        // For now, return true if stamp is present
+        self.stamp.is_some()
+    }
+
     pub fn pack(&mut self) -> Result<&[u8], MessageError> {
         if self.packed.is_some() {
             let slice = self.packed.as_deref().expect("packed present");

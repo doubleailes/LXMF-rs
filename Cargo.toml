@@ -26,3 +26,7 @@ branch = "LXMF"
 [[example]]
 name = "sender"
 path = "examples/sender.rs"
+
+[[example]]
+name = "receiver"
+path = "examples/receiver.rs"
