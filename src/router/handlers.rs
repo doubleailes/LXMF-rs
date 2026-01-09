@@ -64,7 +64,11 @@ impl LXMFDeliveryAnnounceHandler {
     ///
     /// References Python LXMF/LXMF.py LXMFDeliveryAnnounceHandler.stamp_costs
     pub fn get_stamp_cost(&self, destination_hash: &AddressHash) -> Option<u8> {
-        self.stamp_costs.lock().unwrap().get(destination_hash).copied()
+        self.stamp_costs
+            .lock()
+            .unwrap()
+            .get(destination_hash)
+            .copied()
     }
 
     /// Handle a received announce.
@@ -90,10 +94,7 @@ impl LXMFDeliveryAnnounceHandler {
         // References Python LXMF/LXMF.py LXMFDeliveryAnnounceHandler.stamp_costs[destination_hash]
         match std::panic::catch_unwind(|| stamp_cost_from_app_data(app_data)) {
             Ok(stamp_cost_opt) => {
-                log::debug!(
-                    "stamp_cost_from_app_data returned: {:?}",
-                    stamp_cost_opt
-                );
+                log::debug!("stamp_cost_from_app_data returned: {:?}", stamp_cost_opt);
                 if let Some(stamp_cost) = stamp_cost_opt {
                     // Store in handler's stamp_costs cache
                     self.stamp_costs
@@ -181,26 +182,48 @@ impl AnnounceHandler for LXMFDeliveryAnnounceHandler {
         destination: Arc<tokio::sync::Mutex<reticulum::destination::SingleOutputDestination>>,
         app_data: PacketDataBuffer,
     ) {
-        // Get destination hash from destination in a blocking manner
-        // since this is called from an async context but our internal logic is sync
-        let destination_hash = {
-            // Use a blocking task to get the destination hash
-            let dest = destination.blocking_lock();
-            dest.desc.address_hash
-        };
+        // Clone what we need for the spawned task
+        let lxmrouter = self.lxmrouter.clone();
+        let stamp_costs = self.stamp_costs.clone();
 
-        log::info!(
-            "AnnounceHandler: received delivery announce from {} with {} bytes of app_data",
-            hex::encode(destination_hash.as_slice()),
-            app_data.len()
-        );
+        // Spawn a task to handle the announce asynchronously
+        tokio::spawn(async move {
+            let destination_hash = {
+                let dest = destination.lock().await;
+                dest.desc.address_hash
+            };
 
-        // Call the existing received_announce method
-        self.received_announce(destination_hash, app_data.as_slice());
+            log::info!(
+                "AnnounceHandler: received delivery announce from {} with {} bytes of app_data",
+                hex::encode(destination_hash.as_slice()),
+                app_data.len()
+            );
+
+            // Extract stamp cost from app_data
+            if let Some(stamp_cost) = stamp_cost_from_app_data(app_data.as_slice()) {
+                log::info!(
+                    "Caching stamp cost {} for destination {}",
+                    stamp_cost,
+                    destination_hash
+                );
+
+                // Cache in handler's stamp_costs map
+                stamp_costs
+                    .lock()
+                    .unwrap()
+                    .insert(destination_hash, stamp_cost);
+
+                // Also update router's outbound stamp cost cache
+                lxmrouter.update_outbound_stamp_cost(destination_hash, stamp_cost);
+            }
+
+            // TODO: Trigger immediate delivery attempts for matching pending outbound messages
+            // References Python LXMF/LXMF.py LXMFDeliveryAnnounceHandler.received_announce()
+        });
     }
 
     fn aspect_filter(&self) -> Option<&str> {
-        Some(DELIVERY_ASPECT)
+        Some(&self.aspect_filter)
     }
 
     fn receive_path_responses(&self) -> bool {
@@ -262,7 +285,7 @@ impl AnnounceHandler for SharedDeliveryAnnounceHandler {
     }
 
     fn aspect_filter(&self) -> Option<&str> {
-        self.inner.aspect_filter()
+        Some(&self.inner.aspect_filter)
     }
 
     fn receive_path_responses(&self) -> bool {
@@ -406,24 +429,33 @@ impl AnnounceHandler for LXMFPropagationAnnounceHandler {
         destination: Arc<tokio::sync::Mutex<reticulum::destination::SingleOutputDestination>>,
         app_data: PacketDataBuffer,
     ) {
-        // Get destination hash from destination in a blocking manner
-        let destination_hash = {
-            let dest = destination.blocking_lock();
-            dest.desc.address_hash
-        };
+        // Clone data needed for the spawned task
+        let lxmrouter = self.lxmrouter.clone();
+        let app_data_vec = app_data.as_slice().to_vec();
 
-        trace!(
-            "AnnounceHandler: received propagation announce from {}",
-            hex::encode(destination_hash.as_slice())
-        );
+        // Spawn an async task to avoid blocking the runtime
+        tokio::spawn(async move {
+            // Get destination hash using async lock
+            let destination_hash = {
+                let dest = destination.lock().await;
+                dest.desc.address_hash
+            };
 
-        // For now, assume non-path-response announces
-        // TODO: Track path response state when available from transport
-        self.received_announce(destination_hash, app_data.as_slice(), false);
+            trace!(
+                "AnnounceHandler: received propagation announce from {}",
+                hex::encode(destination_hash.as_slice())
+            );
+
+            // Create a temporary handler instance to call received_announce
+            let handler = LXMFPropagationAnnounceHandler::new(lxmrouter);
+            // For now, assume non-path-response announces
+            // TODO: Track path response state when available from transport
+            handler.received_announce(destination_hash, &app_data_vec, false);
+        });
     }
 
     fn aspect_filter(&self) -> Option<&str> {
-        Some(PROPAGATION_ASPECT)
+        Some(&self.aspect_filter)
     }
 
     fn receive_path_responses(&self) -> bool {
