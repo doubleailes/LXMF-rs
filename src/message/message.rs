@@ -216,7 +216,12 @@ impl LXMessage {
 
     pub fn stamp_valid(&self) -> bool {
         // TODO: Implement actual stamp validation logic
-        // For now, return true if stamp is present
+        // For now, this checks if a stamp is present
+        // In the future, this should validate:
+        // 1. Stamp format and structure
+        // 2. Stamp value against stamp_cost
+        // 3. Cryptographic proof-of-work verification
+        // References Python LXMF/LXMF.py LXMessage.validate_stamp()
         self.stamp.is_some()
     }
 

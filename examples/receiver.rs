@@ -64,16 +64,8 @@ fn delivery_callback(message: &LXMessage) {
 }
 
 fn format_timestamp(timestamp: f64) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-
-    let duration = Duration::from_secs_f64(timestamp);
-    let datetime = UNIX_EPOCH + duration;
-    
     // Simple formatting - in production you'd use chrono or time crate
-    let secs_since_epoch = datetime
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let secs_since_epoch = timestamp as u64;
     
     // Basic date formatting
     let days = secs_since_epoch / 86400;
