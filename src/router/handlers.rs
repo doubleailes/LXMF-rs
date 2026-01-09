@@ -383,9 +383,10 @@ impl LXMFPropagationAnnounceHandler {
                     propagation_stamp_cost_flexibility,
                     peering_cost,
                     metadata.clone(),
-                ) {
-                    warn!("Failed to update static peer {}: {}", destination_hash, e);
-                }
+                )
+            {
+                warn!("Failed to update static peer {}: {}", destination_hash, e);
+            }
         } else {
             // Auto-peering logic for non-static peers
             if self.lxmrouter.autopeer_enabled() && !is_path_response {

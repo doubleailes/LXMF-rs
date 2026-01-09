@@ -224,9 +224,10 @@ pub fn pn_announce_data_is_valid(app_data: &[u8]) -> Option<PropagationNodeAnnou
             let mut result = indexmap::IndexMap::new();
             for (k, v) in map {
                 if let (rmpv::Value::Integer(key), rmpv::Value::Binary(val)) = (k, v)
-                    && let Some(key_u8) = key.as_u64().and_then(|n| u8::try_from(n).ok()) {
-                        result.insert(key_u8, val.clone());
-                    }
+                    && let Some(key_u8) = key.as_u64().and_then(|n| u8::try_from(n).ok())
+                {
+                    result.insert(key_u8, val.clone());
+                }
             }
             if result.is_empty() {
                 None
