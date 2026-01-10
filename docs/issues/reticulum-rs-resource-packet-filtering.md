@@ -32,6 +32,7 @@ PR #37 (`copilot/fix-filter-duplicate-packets-again` @ `4b6c231a`) was merged wi
 ```
 
 The packets are:
+
 1. ✅ Received by tcp_client (logged at "rx <<")
 2. ❌ NOT dropped by filter (no "dropping duplicate" log)
 3. ❌ NOT routed to handler (no "routing packet" log)
