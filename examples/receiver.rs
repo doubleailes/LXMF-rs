@@ -86,8 +86,9 @@ fn format_timestamp(timestamp: f64) -> String {
 #[tokio::main]
 async fn main() {
     // Initialize logging
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace")).init();
-
+    let mut env_log =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace"));
+    env_log.init();
     log::info!("LXMF Receiver Example");
     log::info!("=====================");
 

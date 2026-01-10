@@ -1009,11 +1009,31 @@ impl LxmRouter {
                         // Process the LXMF message from link data
                         // For link delivery, the payload contains the full LXMF message
                         // (destination hash prepended, like single packet delivery)
-                        if let Err(e) = self.process_inbound_lxmf_link_data(
+                        match self.process_inbound_lxmf_link_data(
                             link_event_data.address_hash,
                             payload.as_slice(),
                         ) {
-                            log::error!("Error processing LXMF link data: {}", e);
+                            Ok(()) => {
+                                // TODO: Send delivery receipt/proof to sender
+                                //
+                                // Python LXMF calls packet.prove() which sends a signed hash
+                                // back to the sender. This requires:
+                                // 1. Access to the original packet hash (not available in LinkEvent::Data)
+                                // 2. Link::prove_packet() method in Reticulum-rs (not yet implemented)
+                                //
+                                // For now, delivery confirmation relies on Resource-based delivery
+                                // where ResourceManager automatically sends ResourceProof.
+                                //
+                                // See: Python LXMF LXMRouter.delivery_packet() -> packet.prove()
+                                // See: Python RNS Link.prove_packet() for proof format
+                                log::debug!(
+                                    "Successfully processed LXMF message over link {} - delivery receipt not yet implemented",
+                                    link_event_data.id
+                                );
+                            }
+                            Err(e) => {
+                                log::error!("Error processing LXMF link data: {}", e);
+                            }
                         }
                     }
                 }
@@ -1052,12 +1072,24 @@ impl LxmRouter {
                         guard.clone()
                     };
 
+                    debug!(
+                        "Processing resource packet: type={:?}, context={:?}, payload_len={}",
+                        resource_packet.packet_type,
+                        resource_packet.context,
+                        resource_packet.payload.len()
+                    );
+
                     let events = {
                         let mut guard = manager.lock().await;
                         guard
                             .handle_packet(&transport_clone, &resource_packet)
                             .await
                     };
+
+                    debug!(
+                        "Resource handle_packet returned: {:?}",
+                        events.as_ref().map(|e| e.len())
+                    );
 
                     match events {
                         Ok(events) => {
@@ -1133,8 +1165,8 @@ impl LxmRouter {
         for event in events {
             match event {
                 ResourceEvent::IncomingAccepted { hash, total_size } => {
-                    debug!(
-                        "Accepted resource {} for destination {} ({} bytes)",
+                    info!(
+                        "Accepted resource {} for destination {} ({} bytes) - ResourceRequest should have been sent",
                         hex::encode(hash.as_slice()),
                         hex::encode(destination_hash.as_slice()),
                         total_size
@@ -1200,18 +1232,23 @@ impl LxmRouter {
     /// Process inbound LXMF data received over a link.
     ///
     /// References Python LXMF/LXMF.py LXMRouter.delivery_packet()
+    ///
+    /// For DIRECT (link) delivery, Python LXMF sends the complete packed message
+    /// including the destination hash. This is different from OPPORTUNISTIC (single packet)
+    /// delivery where the destination hash is stripped by the sender and prepended by the receiver.
+    ///
+    /// See Python LXMF LXMessage.__as_packet():
+    /// - OPPORTUNISTIC: sends self.packed[DESTINATION_LENGTH:] (strips dest hash)
+    /// - DIRECT: sends self.packed (includes dest hash)
     fn process_inbound_lxmf_link_data(
         &self,
-        destination_hash: AddressHash,
+        _destination_hash: AddressHash,
         payload: &[u8],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use reticulum::hash::ADDRESS_HASH_SIZE;
-
-        // For link delivery, we reconstruct the full LXMF bytes by prepending destination hash
-        // (same as single packet delivery - the destination hash identifies the recipient)
-        let mut lxmf_bytes = Vec::with_capacity(ADDRESS_HASH_SIZE + payload.len());
-        lxmf_bytes.extend_from_slice(destination_hash.as_slice());
-        lxmf_bytes.extend_from_slice(payload);
+        // For DIRECT (link) delivery, the payload already contains the full LXMF message:
+        // destination_hash (16) + source_hash (16) + signature (64) + msgpack_payload
+        // Do NOT prepend destination_hash - it's already included!
+        let lxmf_bytes = payload;
 
         log::debug!(
             "Unpacking LXMF message from link ({} bytes)",
@@ -1219,7 +1256,7 @@ impl LxmRouter {
         );
 
         // Unpack the LXMF message
-        let message = LXMessage::unpack_from_bytes(&lxmf_bytes)
+        let message = LXMessage::unpack_from_bytes(lxmf_bytes)
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
 
         log::info!(

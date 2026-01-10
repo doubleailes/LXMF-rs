@@ -525,7 +525,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 [[package]]
 name = "reticulum"
 version = "0.1.0"
-source = "git+https://github.com/doubleailes/Reticulum-rs?branch=LXMF#b4144d7302baf5a158e420202e8fb77eace1ae8a"
+source = "git+https://github.com/doubleailes/Reticulum-rs?branch=copilot%2Ffix-filter-duplicate-packets-again#4b6c231a78e568fb87adfcba76242710054721c2"
 dependencies = [
  "aes",
  "cbc",

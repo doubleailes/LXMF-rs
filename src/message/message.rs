@@ -22,6 +22,49 @@ const ENCRYPTION_DESCRIPTION_AES: &str = "AES-128";
 const ENCRYPTION_DESCRIPTION_EC: &str = "Curve25519";
 const ENCRYPTION_DESCRIPTION_UNENCRYPTED: &str = "Unencrypted";
 
+/// LXMF Field IDs (from Python LXMF/LXMF.py)
+/// These are integer keys used in the fields map.
+#[allow(dead_code)]
+pub const FIELD_EMBEDDED_LXMS: u8 = 0x01;
+#[allow(dead_code)]
+pub const FIELD_TELEMETRY: u8 = 0x02;
+#[allow(dead_code)]
+pub const FIELD_TELEMETRY_STREAM: u8 = 0x03;
+#[allow(dead_code)]
+pub const FIELD_ICON_APPEARANCE: u8 = 0x04;
+#[allow(dead_code)]
+pub const FIELD_FILE_ATTACHMENTS: u8 = 0x05;
+#[allow(dead_code)]
+pub const FIELD_IMAGE: u8 = 0x06;
+#[allow(dead_code)]
+pub const FIELD_AUDIO: u8 = 0x07;
+#[allow(dead_code)]
+pub const FIELD_THREAD: u8 = 0x08;
+#[allow(dead_code)]
+pub const FIELD_COMMANDS: u8 = 0x09;
+#[allow(dead_code)]
+pub const FIELD_RESULTS: u8 = 0x0A;
+#[allow(dead_code)]
+pub const FIELD_GROUP: u8 = 0x0B;
+#[allow(dead_code)]
+pub const FIELD_TICKET: u8 = 0x0C;
+#[allow(dead_code)]
+pub const FIELD_EVENT: u8 = 0x0D;
+#[allow(dead_code)]
+pub const FIELD_RNR_REFS: u8 = 0x0E;
+#[allow(dead_code)]
+pub const FIELD_RENDERER: u8 = 0x0F;
+#[allow(dead_code)]
+pub const FIELD_CUSTOM_TYPE: u8 = 0xFB;
+#[allow(dead_code)]
+pub const FIELD_CUSTOM_DATA: u8 = 0xFC;
+#[allow(dead_code)]
+pub const FIELD_CUSTOM_META: u8 = 0xFD;
+#[allow(dead_code)]
+pub const FIELD_NON_SPECIFIC: u8 = 0xFE;
+#[allow(dead_code)]
+pub const FIELD_DEBUG: u8 = 0xFF;
+
 type SignatureBytes = [u8; SIGNATURE_LENGTH];
 
 pub struct LXMessage {
@@ -51,13 +94,18 @@ pub struct LXMessage {
 }
 
 impl LXMessage {
+    /// Create a new LXMF message.
+    ///
+    /// `fields` uses integer keys (u8) matching Python's field identifiers.
+    /// Keys are defined in LXMF/LXMF.py, e.g., FIELD_TICKET = 0x0C.
+    /// Values are raw MessagePack-encoded data.
     #[allow(clippy::too_many_arguments)]
     pub fn new<T: Into<Vec<u8>>, U: Into<Vec<u8>>>(
         destination: SingleOutputDestination,
         source: SingleInputDestination,
         content: T,
         title: U,
-        fields: Option<IndexMap<String, Vec<u8>>>,
+        fields: Option<IndexMap<u8, Vec<u8>>>,
         desired_method: Option<ValidMethod>,
         include_ticket: bool,
     ) -> Self {
@@ -133,12 +181,12 @@ impl LXMessage {
         String::from_utf8(self.payload.content.clone())
     }
 
-    pub fn set_fields(&mut self, fields: Option<IndexMap<String, Vec<u8>>>) {
+    pub fn set_fields(&mut self, fields: Option<IndexMap<u8, Vec<u8>>>) {
         self.payload.fields = fields.unwrap_or_default();
         self.invalidate_cache();
     }
 
-    pub fn fields(&self) -> &IndexMap<String, Vec<u8>> {
+    pub fn fields(&self) -> &IndexMap<u8, Vec<u8>> {
         &self.payload.fields
     }
 
@@ -353,6 +401,13 @@ impl LXMessage {
     }
 
     pub fn unpack_from_bytes(lxmf_bytes: &[u8]) -> Result<Self, MessageError> {
+        // Debug: log incoming LXMF bytes structure
+        log::debug!(
+            "unpack_from_bytes: {} bytes total, first 48: {:02x?}",
+            lxmf_bytes.len(),
+            &lxmf_bytes[..std::cmp::min(48, lxmf_bytes.len())]
+        );
+
         if lxmf_bytes.len() < DESTINATION_LENGTH * 2 + SIGNATURE_LENGTH {
             return Err(MessageError::InvalidFormat("LXMF payload too short".into()));
         }
@@ -366,6 +421,13 @@ impl LXMessage {
         signature
             .copy_from_slice(&lxmf_bytes[signature_offset..signature_offset + SIGNATURE_LENGTH]);
         let payload_bytes = lxmf_bytes[signature_offset + SIGNATURE_LENGTH..].to_vec();
+
+        log::debug!(
+            "unpack_from_bytes: dest={} src={} payload_bytes_len={}",
+            hex::encode(destination_hash.as_slice()),
+            hex::encode(source_hash.as_slice()),
+            payload_bytes.len()
+        );
 
         let decoded = Self::decode_payload_bytes(&payload_bytes)?;
         let payload = LxPayload::from_parts(
@@ -528,9 +590,11 @@ impl LXMessage {
         encode::write_map_len(&mut buf, self.payload.fields.len() as u32)
             .map_err(|e| MessageError::SerializationError(e.to_string()))?;
         for (key, value) in &self.payload.fields {
-            encode::write_str(&mut buf, key)
+            // Write integer key (field ID like FIELD_TICKET = 0x0C)
+            encode::write_uint(&mut buf, *key as u64)
                 .map_err(|e| MessageError::SerializationError(e.to_string()))?;
-            write_bin(&mut buf, value)?;
+            // Write raw MessagePack value (already encoded)
+            buf.extend_from_slice(value);
         }
         if include_stamp_entry && let Some(stamp) = &self.stamp {
             write_bin(&mut buf, stamp)?;
@@ -539,9 +603,21 @@ impl LXMessage {
     }
 
     fn decode_payload_bytes(bytes: &[u8]) -> Result<DecodedPayload, MessageError> {
+        // Debug: log first bytes to understand format
+        log::debug!(
+            "decode_payload_bytes: {} bytes, first 32: {:02x?}",
+            bytes.len(),
+            &bytes[..std::cmp::min(32, bytes.len())]
+        );
+
         let mut cursor = Cursor::new(bytes);
         let len = decode::read_array_len(&mut cursor)
             .map_err(|e| MessageError::DeserializationError(e.to_string()))?;
+        log::debug!(
+            "decode_payload_bytes: array_len={}, pos={}",
+            len,
+            cursor.position()
+        );
         if len < 4 {
             return Err(MessageError::InvalidFormat(
                 "Payload missing required fields".into(),
@@ -549,10 +625,46 @@ impl LXMessage {
         }
         let timestamp = decode::read_f64(&mut cursor)
             .map_err(|e| MessageError::DeserializationError(e.to_string()))?;
+        log::debug!(
+            "decode_payload_bytes: timestamp={}, pos={}",
+            timestamp,
+            cursor.position()
+        );
         let title = read_bin(&mut cursor)?;
+        log::debug!(
+            "decode_payload_bytes: title={} bytes, pos={}",
+            title.len(),
+            cursor.position()
+        );
         let content = read_bin(&mut cursor)?;
-        let fields_len = decode::read_map_len(&mut cursor)
-            .map_err(|e| MessageError::DeserializationError(e.to_string()))?;
+        log::debug!(
+            "decode_payload_bytes: content={} bytes, pos={}",
+            content.len(),
+            cursor.position()
+        );
+
+        // Debug: show next few bytes before reading map
+        let pos = cursor.position() as usize;
+        let remaining = &bytes[pos..std::cmp::min(pos + 16, bytes.len())];
+        log::debug!(
+            "decode_payload_bytes: before fields map, pos={}, next bytes: {:02x?}",
+            pos,
+            remaining
+        );
+
+        let fields_len = decode::read_map_len(&mut cursor).map_err(|e| {
+            log::error!(
+                "decode_payload_bytes: read_map_len failed at pos {}: {}",
+                cursor.position(),
+                e
+            );
+            MessageError::DeserializationError(e.to_string())
+        })?;
+        log::debug!(
+            "decode_payload_bytes: fields_len={}, pos={}",
+            fields_len,
+            cursor.position()
+        );
         let fields = decode_fields(&mut cursor, fields_len)?;
         let stamp = if len > 4 {
             Some(read_bin(&mut cursor)?)
@@ -628,7 +740,7 @@ fn encode_payload_without_stamp(
     timestamp: f64,
     title: &[u8],
     content: &[u8],
-    fields: &IndexMap<String, Vec<u8>>,
+    fields: &IndexMap<u8, Vec<u8>>,
 ) -> Result<Vec<u8>, MessageError> {
     let mut buf = Vec::new();
     encode::write_array_len(&mut buf, 4)
@@ -640,9 +752,11 @@ fn encode_payload_without_stamp(
     encode::write_map_len(&mut buf, fields.len() as u32)
         .map_err(|e| MessageError::SerializationError(e.to_string()))?;
     for (key, value) in fields {
-        encode::write_str(&mut buf, key)
+        // Write integer key (field ID)
+        encode::write_uint(&mut buf, *key as u64)
             .map_err(|e| MessageError::SerializationError(e.to_string()))?;
-        write_bin(&mut buf, value)?;
+        // Write raw MessagePack value
+        buf.extend_from_slice(value);
     }
     Ok(buf)
 }
@@ -675,14 +789,254 @@ fn read_string<R: Read>(reader: &mut R) -> Result<String, MessageError> {
     String::from_utf8(buf).map_err(|e| MessageError::DeserializationError(e.to_string()))
 }
 
-fn decode_fields<R: Read>(
-    reader: &mut R,
+/// Calculate the length of a MessagePack value starting at `pos` in `data`.
+/// Returns the total byte length of the value (including marker and content).
+fn msgpack_value_length(data: &[u8], pos: usize) -> Result<usize, MessageError> {
+    if pos >= data.len() {
+        return Err(MessageError::DeserializationError(
+            "Unexpected end of data".into(),
+        ));
+    }
+
+    let marker = data[pos];
+
+    match marker {
+        // Positive fixint (0x00 - 0x7f)
+        0x00..=0x7f => Ok(1),
+        // Fixmap (0x80 - 0x8f)
+        0x80..=0x8f => {
+            let count = (marker & 0x0f) as usize;
+            let mut offset = 1;
+            for _ in 0..count {
+                let key_len = msgpack_value_length(data, pos + offset)?;
+                offset += key_len;
+                let val_len = msgpack_value_length(data, pos + offset)?;
+                offset += val_len;
+            }
+            Ok(offset)
+        }
+        // Fixarray (0x90 - 0x9f)
+        0x90..=0x9f => {
+            let count = (marker & 0x0f) as usize;
+            let mut offset = 1;
+            for _ in 0..count {
+                let elem_len = msgpack_value_length(data, pos + offset)?;
+                offset += elem_len;
+            }
+            Ok(offset)
+        }
+        // Fixstr (0xa0 - 0xbf)
+        0xa0..=0xbf => Ok(1 + (marker & 0x1f) as usize),
+        // nil, false, true
+        0xc0 | 0xc2 | 0xc3 => Ok(1),
+        // bin8
+        0xc4 => {
+            if pos + 2 > data.len() {
+                return Err(MessageError::DeserializationError(
+                    "bin8: unexpected end".into(),
+                ));
+            }
+            Ok(2 + data[pos + 1] as usize)
+        }
+        // bin16
+        0xc5 => {
+            if pos + 3 > data.len() {
+                return Err(MessageError::DeserializationError(
+                    "bin16: unexpected end".into(),
+                ));
+            }
+            Ok(3 + u16::from_be_bytes([data[pos + 1], data[pos + 2]]) as usize)
+        }
+        // bin32
+        0xc6 => {
+            if pos + 5 > data.len() {
+                return Err(MessageError::DeserializationError(
+                    "bin32: unexpected end".into(),
+                ));
+            }
+            Ok(
+                5 + u32::from_be_bytes([data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4]])
+                    as usize,
+            )
+        }
+        // ext8, ext16, ext32 (rare in LXMF)
+        0xc7..=0xc9 => Err(MessageError::DeserializationError(
+            "ext types not yet supported".into(),
+        )),
+        // float32
+        0xca => Ok(5),
+        // float64
+        0xcb => Ok(9),
+        // uint8
+        0xcc => Ok(2),
+        // uint16
+        0xcd => Ok(3),
+        // uint32
+        0xce => Ok(5),
+        // uint64
+        0xcf => Ok(9),
+        // int8
+        0xd0 => Ok(2),
+        // int16
+        0xd1 => Ok(3),
+        // int32
+        0xd2 => Ok(5),
+        // int64
+        0xd3 => Ok(9),
+        // fixext1, fixext2, fixext4, fixext8, fixext16
+        0xd4..=0xd8 => Err(MessageError::DeserializationError(
+            "fixext types not yet supported".into(),
+        )),
+        // str8
+        0xd9 => {
+            if pos + 2 > data.len() {
+                return Err(MessageError::DeserializationError(
+                    "str8: unexpected end".into(),
+                ));
+            }
+            Ok(2 + data[pos + 1] as usize)
+        }
+        // str16
+        0xda => {
+            if pos + 3 > data.len() {
+                return Err(MessageError::DeserializationError(
+                    "str16: unexpected end".into(),
+                ));
+            }
+            Ok(3 + u16::from_be_bytes([data[pos + 1], data[pos + 2]]) as usize)
+        }
+        // str32
+        0xdb => {
+            if pos + 5 > data.len() {
+                return Err(MessageError::DeserializationError(
+                    "str32: unexpected end".into(),
+                ));
+            }
+            Ok(
+                5 + u32::from_be_bytes([data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4]])
+                    as usize,
+            )
+        }
+        // array16
+        0xdc => {
+            if pos + 3 > data.len() {
+                return Err(MessageError::DeserializationError(
+                    "array16: unexpected end".into(),
+                ));
+            }
+            let count = u16::from_be_bytes([data[pos + 1], data[pos + 2]]) as usize;
+            let mut offset = 3;
+            for _ in 0..count {
+                let elem_len = msgpack_value_length(data, pos + offset)?;
+                offset += elem_len;
+            }
+            Ok(offset)
+        }
+        // array32
+        0xdd => {
+            if pos + 5 > data.len() {
+                return Err(MessageError::DeserializationError(
+                    "array32: unexpected end".into(),
+                ));
+            }
+            let count =
+                u32::from_be_bytes([data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4]])
+                    as usize;
+            let mut offset = 5;
+            for _ in 0..count {
+                let elem_len = msgpack_value_length(data, pos + offset)?;
+                offset += elem_len;
+            }
+            Ok(offset)
+        }
+        // map16
+        0xde => {
+            if pos + 3 > data.len() {
+                return Err(MessageError::DeserializationError(
+                    "map16: unexpected end".into(),
+                ));
+            }
+            let count = u16::from_be_bytes([data[pos + 1], data[pos + 2]]) as usize;
+            let mut offset = 3;
+            for _ in 0..count {
+                let key_len = msgpack_value_length(data, pos + offset)?;
+                offset += key_len;
+                let val_len = msgpack_value_length(data, pos + offset)?;
+                offset += val_len;
+            }
+            Ok(offset)
+        }
+        // map32
+        0xdf => {
+            if pos + 5 > data.len() {
+                return Err(MessageError::DeserializationError(
+                    "map32: unexpected end".into(),
+                ));
+            }
+            let count =
+                u32::from_be_bytes([data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4]])
+                    as usize;
+            let mut offset = 5;
+            for _ in 0..count {
+                let key_len = msgpack_value_length(data, pos + offset)?;
+                offset += key_len;
+                let val_len = msgpack_value_length(data, pos + offset)?;
+                offset += val_len;
+            }
+            Ok(offset)
+        }
+        // Negative fixint (0xe0 - 0xff)
+        0xe0..=0xff => Ok(1),
+        // Reserved (0xc1)
+        0xc1 => Err(MessageError::DeserializationError(
+            "Reserved marker 0xc1".into(),
+        )),
+    }
+}
+
+/// Read a complete MessagePack value from the cursor, returning its raw bytes.
+/// This is used to store field values of any type without deserializing them.
+fn read_msgpack_value(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>, MessageError> {
+    let start_pos = cursor.position() as usize;
+    let data = *cursor.get_ref();
+
+    let value_len = msgpack_value_length(data, start_pos)?;
+
+    if start_pos + value_len > data.len() {
+        return Err(MessageError::DeserializationError(format!(
+            "Value extends beyond data: start={}, len={}, data_len={}",
+            start_pos,
+            value_len,
+            data.len()
+        )));
+    }
+
+    cursor.set_position((start_pos + value_len) as u64);
+    Ok(data[start_pos..start_pos + value_len].to_vec())
+}
+
+fn decode_fields(
+    cursor: &mut Cursor<&[u8]>,
     len: u32,
-) -> Result<IndexMap<String, Vec<u8>>, MessageError> {
+) -> Result<IndexMap<u8, Vec<u8>>, MessageError> {
     let mut fields = IndexMap::with_capacity(len as usize);
     for _ in 0..len {
-        let key = read_string(reader)?;
-        let value = read_bin(reader)?;
+        // Read integer key (field ID like FIELD_TICKET = 0x0C)
+        let key: i64 = decode::read_int(cursor).map_err(|e| {
+            MessageError::DeserializationError(format!("Failed to read field key: {}", e))
+        })?;
+        let key = key as u8;
+
+        // Read the value as raw MessagePack bytes
+        let value = read_msgpack_value(cursor)?;
+
+        log::debug!(
+            "decode_fields: key=0x{:02x}, value_len={}, value_bytes={:02x?}",
+            key,
+            value.len(),
+            &value[..std::cmp::min(16, value.len())]
+        );
+
         fields.insert(key, value);
     }
     Ok(fields)
@@ -698,7 +1052,7 @@ struct DecodedPayload {
     timestamp: f64,
     title: Vec<u8>,
     content: Vec<u8>,
-    fields: IndexMap<String, Vec<u8>>,
+    fields: IndexMap<u8, Vec<u8>>,
     stamp: Option<Vec<u8>>,
 }
 
@@ -799,8 +1153,10 @@ mod tests {
             DestinationName::new("lxmf", "delivery"),
         );
 
+        // Use FIELD_DEBUG (0xFF) with a simple MessagePack-encoded bin value
         let mut fields = IndexMap::new();
-        fields.insert("lang".into(), b"rust".to_vec());
+        // Value is MessagePack-encoded: c4 04 72 75 73 74 = bin8(4) "rust"
+        fields.insert(FIELD_DEBUG, vec![0xc4, 0x04, 0x72, 0x75, 0x73, 0x74]);
 
         LXMessage::new(
             destination,
@@ -823,9 +1179,6 @@ mod tests {
     ///
     /// For timestamp=1234567890.123456, title=b"greet", content=b"hello", fields={}:
     /// Python produces: 94cb41d26580b487e6b4c4056772656574c40568656c6c6f80
-    ///
-    /// For same with fields={"lang": b"rust"}:
-    /// Python produces: 94cb41d26580b487e6b4c4056772656574c40568656c6c6f81a46c616e67c40472757374
     #[test]
     fn payload_encoding_matches_python() {
         // Create a message with specific timestamp
@@ -852,9 +1205,10 @@ mod tests {
             encoded, expected
         );
 
-        // Test with field entry
+        // Test with field entry using integer key (FIELD_DEBUG = 0xFF)
+        // Value is already MessagePack-encoded: c4 04 72 75 73 74 = bin8(4) "rust"
         let mut fields = IndexMap::new();
-        fields.insert("lang".into(), b"rust".to_vec());
+        fields.insert(FIELD_DEBUG, vec![0xc4, 0x04, 0x72, 0x75, 0x73, 0x74]);
         message.payload.fields = fields;
 
         let encoded_with_field = message.encode_payload_bytes(false).unwrap();
@@ -864,8 +1218,8 @@ mod tests {
             0xc4, 0x05, 0x67, 0x72, 0x65, 0x65, 0x74, // bin8 "greet"
             0xc4, 0x05, 0x68, 0x65, 0x6c, 0x6c, 0x6f, // bin8 "hello"
             0x81, // fixmap(1)
-            0xa4, 0x6c, 0x61, 0x6e, 0x67, // fixstr "lang"
-            0xc4, 0x04, 0x72, 0x75, 0x73, 0x74, // bin8 "rust"
+            0xcc, 0xff, // uint8 255 (FIELD_DEBUG)
+            0xc4, 0x04, 0x72, 0x75, 0x73, 0x74, // bin8 "rust" (raw MessagePack value)
         ];
 
         assert_eq!(
@@ -884,7 +1238,11 @@ mod tests {
         let unpacked = LXMessage::unpack_from_bytes(&packed).expect("unpack");
         assert_eq!(unpacked.payload.content, b"hello".to_vec());
         assert_eq!(unpacked.payload.title, b"greet".to_vec());
-        assert_eq!(unpacked.payload.fields.get("lang"), Some(&b"rust".to_vec()));
+        // FIELD_DEBUG = 0xFF contains raw MessagePack: c4 04 72 75 73 74 = bin8(4) "rust"
+        assert_eq!(
+            unpacked.payload.fields.get(&FIELD_DEBUG),
+            Some(&vec![0xc4, 0x04, 0x72, 0x75, 0x73, 0x74])
+        );
     }
 
     #[test]
