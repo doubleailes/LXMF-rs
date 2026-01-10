@@ -22,18 +22,20 @@ use std::{
 use log::{debug, error, info, trace, warn};
 use rand_core::OsRng;
 use reticulum::{
-    destination::{DestinationName, SingleOutputDestination},
+    destination::link::LinkEvent,
+    destination::{DestinationName, SingleInputDestination},
     error::RnsError,
     hash::{ADDRESS_HASH_SIZE, AddressHash},
     identity::PrivateIdentity,
     packet::PacketContext,
+    resource::{ResourceEvent, ResourceManager, ResourceStrategy},
     transport::Transport,
 };
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 
 use crate::{
-    LXMessage, LxmPeer, PeerMetadata, SyncStrategy,
+    LXMessage, LxmPeer, PeerMetadata, PeerState, SyncStrategy,
     message::{
         MessageError,
         message::State,
@@ -395,7 +397,7 @@ impl RouterPaths {
 
 struct DeliveryDestination {
     identity: PrivateIdentity,
-    destination: SingleOutputDestination,
+    input_destination: Option<Arc<tokio::sync::Mutex<SingleInputDestination>>>,
     display_name: Option<String>,
     inbound_stamp_cost: Option<u8>,
 }
@@ -520,7 +522,7 @@ pub(crate) struct RouterInner {
     identity: PrivateIdentity,
     cfg: RouterConfig,
     paths: RouterPaths,
-    transport: Mutex<Option<Arc<Transport>>>,
+    transport: Mutex<Option<Arc<tokio::sync::Mutex<Transport>>>>,
     runtime_handle: Mutex<Option<Handle>>,
 
     pending_inbound: Mutex<VecDeque<Vec<u8>>>,
@@ -529,6 +531,7 @@ pub(crate) struct RouterInner {
 
     direct_links: Mutex<HashMap<AddressHash, ()>>,
     backchannel_links: Mutex<HashMap<AddressHash, ()>>,
+    resource_managers: Mutex<HashMap<AddressHash, Arc<tokio::sync::Mutex<ResourceManager>>>>,
 
     delivery_destinations: Mutex<HashMap<AddressHash, DeliveryDestination>>,
 
@@ -637,26 +640,31 @@ impl LxmRouter {
         stamp_cost: Option<u8>,
     ) -> Result<AddressHash, RouterError> {
         let identity = identity.unwrap_or_else(|| self.inner.identity.clone());
-        let destination = SingleOutputDestination::new(
-            *identity.as_identity(),
+        let dest_hash = SingleInputDestination::new(
+            identity.clone(),
             DestinationName::new(APP_NAME, DELIVERY_ASPECT),
-        );
-        let dest_hash = destination.desc.address_hash;
+        )
+        .desc
+        .address_hash;
 
-        let mut map = self.inner.delivery_destinations.lock().unwrap();
-        if !map.is_empty() {
-            return Err(RouterError::DuplicateDeliveryIdentity);
+        {
+            let mut map = self.inner.delivery_destinations.lock().unwrap();
+            if !map.is_empty() {
+                return Err(RouterError::DuplicateDeliveryIdentity);
+            }
+
+            map.insert(
+                dest_hash,
+                DeliveryDestination {
+                    identity,
+                    input_destination: None,
+                    display_name,
+                    inbound_stamp_cost: stamp_cost,
+                },
+            );
         }
 
-        map.insert(
-            dest_hash,
-            DeliveryDestination {
-                identity,
-                destination,
-                display_name,
-                inbound_stamp_cost: stamp_cost,
-            },
-        );
+        self.spawn_destination_registration(dest_hash);
 
         Ok(dest_hash)
     }
@@ -666,6 +674,19 @@ impl LxmRouter {
         F: Fn(&LXMessage) + Send + Sync + 'static,
     {
         *self.inner.delivery_callback.lock().unwrap() = Some(Arc::new(callback));
+    }
+
+    /// Trigger the delivery callback with a received message.
+    ///
+    /// This should be called when an LXMF message is received for a registered
+    /// delivery destination. It will invoke the callback registered via
+    /// `register_delivery_callback()`.
+    pub fn trigger_delivery_callback(&self, message: &LXMessage) {
+        if let Some(callback) = self.inner.delivery_callback.lock().unwrap().as_ref() {
+            callback(message);
+        } else {
+            log::warn!("No delivery callback registered");
+        }
     }
 
     /// Build the announce app_data for a delivery destination.
@@ -706,26 +727,14 @@ impl LxmRouter {
             .clone()
             .ok_or(RouterError::NoTransportAttached)?;
 
-        // Get the identity to create an input destination for announcing
-        let input_destination = {
-            let map = self.inner.delivery_destinations.lock().unwrap();
-            let dest = map.get(&destination_hash).ok_or({
-                RouterError::InvalidHashLength {
-                    expected: ADDRESS_HASH_SIZE,
-                    got: 0,
-                }
-            })?;
-
-            // Create a SingleInputDestination from the stored identity
-            let input_dest = reticulum::destination::SingleInputDestination::new(
-                dest.identity.clone(),
-                DestinationName::new(APP_NAME, DELIVERY_ASPECT),
-            );
-            Arc::new(tokio::sync::Mutex::new(input_dest))
-        };
+        let input_destination = self
+            .ensure_registered_destination(&transport, destination_hash)
+            .await?;
 
         let app_data = self.get_announce_app_data(destination_hash);
         transport
+            .lock()
+            .await
             .send_announce(&input_destination, app_data.as_deref())
             .await;
 
@@ -736,31 +745,566 @@ impl LxmRouter {
         Ok(())
     }
 
+    async fn register_delivery_destinations_with_transport(
+        &self,
+        transport: Arc<tokio::sync::Mutex<Transport>>,
+    ) -> Result<(), RouterError> {
+        let destination_hashes: Vec<AddressHash> = {
+            let map = self.inner.delivery_destinations.lock().unwrap();
+            map.keys().cloned().collect()
+        };
+
+        trace!(
+            "Registering {} delivery destinations with transport",
+            destination_hashes.len()
+        );
+
+        for hash in destination_hashes {
+            trace!(
+                "Registering delivery destination {} with transport",
+                hex::encode(hash.as_slice())
+            );
+            self.ensure_registered_destination(&transport, hash).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_registered_destination(
+        &self,
+        transport: &Arc<tokio::sync::Mutex<Transport>>,
+        destination_hash: AddressHash,
+    ) -> Result<Arc<tokio::sync::Mutex<SingleInputDestination>>, RouterError> {
+        if let Some(existing) = self
+            .inner
+            .delivery_destinations
+            .lock()
+            .unwrap()
+            .get(&destination_hash)
+            .and_then(|dest| dest.input_destination.clone())
+        {
+            trace!(
+                "Destination {} already registered with transport",
+                hex::encode(destination_hash.as_slice())
+            );
+            return Ok(existing);
+        }
+
+        let identity = {
+            let map = self.inner.delivery_destinations.lock().unwrap();
+            let dest = map
+                .get(&destination_hash)
+                .ok_or(RouterError::UnknownDeliveryDestination(destination_hash))?;
+            dest.identity.clone()
+        };
+
+        debug!(
+            "Registering destination {} with transport (identity: {})",
+            hex::encode(destination_hash.as_slice()),
+            hex::encode(identity.as_identity().verifying_key.as_bytes())
+        );
+
+        // Use the mutex to get mutable access without cloning
+        let registered = transport
+            .lock()
+            .await
+            .add_destination(
+                identity.clone(),
+                DestinationName::new(APP_NAME, DELIVERY_ASPECT),
+            )
+            .await;
+
+        // Log the actual address hash that was registered
+        let registered_hash = registered.lock().await.desc.address_hash;
+        info!(
+            "Destination registered with transport: expected={}, actual={}",
+            hex::encode(destination_hash.as_slice()),
+            hex::encode(registered_hash.as_slice())
+        );
+
+        let mut map = self.inner.delivery_destinations.lock().unwrap();
+        let dest = map
+            .get_mut(&destination_hash)
+            .ok_or(RouterError::UnknownDeliveryDestination(destination_hash))?;
+        dest.input_destination = Some(registered.clone());
+        Ok(registered)
+    }
+
+    fn spawn_destination_registration(&self, destination_hash: AddressHash) {
+        let transport = { self.inner.transport.lock().unwrap().clone() };
+        let Some(transport) = transport else {
+            return;
+        };
+
+        let Some(handle) = self.inner.runtime_handle.lock().unwrap().clone() else {
+            return;
+        };
+
+        let router = self.clone();
+        handle.spawn(async move {
+            if let Err(err) = router
+                .ensure_registered_destination(&transport, destination_hash)
+                .await
+            {
+                warn!(
+                    "Failed to register delivery destination {}: {}",
+                    hex::encode(destination_hash.as_slice()),
+                    err
+                );
+            }
+        });
+    }
+
     /// Attach a Reticulum transport so queued LXMs can be forwarded automatically.
     ///
     /// This also registers the LXMF announce handlers with the transport:
     /// - `LXMFDeliveryAnnounceHandler` for "lxmf.delivery" announces
     /// - `LXMFPropagationAnnounceHandler` for "lxmf.propagation" announces
     ///
+    /// Additionally, this registers all delivery destinations with the transport
+    /// so they can receive incoming LXMF messages.
+    ///
     /// References Python LXMF/LXMF.py LXMRouter.__init__() handler registration
-    pub async fn attach_transport(&self, transport: Arc<Transport>) -> Result<(), RouterError> {
+    pub async fn attach_transport(
+        &self,
+        transport: Arc<tokio::sync::Mutex<Transport>>,
+    ) -> Result<(), RouterError> {
         let handle = Handle::try_current()
             .map_err(|err| RouterError::RuntimeUnavailable(err.to_string()))?;
 
         // Store transport and runtime handle
         *self.inner.transport.lock().unwrap() = Some(transport.clone());
-        *self.inner.runtime_handle.lock().unwrap() = Some(handle);
+        *self.inner.runtime_handle.lock().unwrap() = Some(handle.clone());
 
         // Register announce handlers like Python LXMF does in __init__
         let delivery_handler = LXMFDeliveryAnnounceHandler::new(self.clone());
         let propagation_handler = LXMFPropagationAnnounceHandler::new(self.clone());
 
-        transport.register_announce_handler(delivery_handler).await;
         transport
+            .lock()
+            .await
+            .register_announce_handler(delivery_handler)
+            .await;
+        transport
+            .lock()
+            .await
             .register_announce_handler(propagation_handler)
             .await;
 
         debug!("Registered LXMF announce handlers with transport");
+
+        self.register_delivery_destinations_with_transport(transport.clone())
+            .await?;
+
+        // Start background task to process incoming LXMF messages (single packets)
+        let router = self.clone();
+        let transport_clone = transport.clone();
+        handle.spawn(async move {
+            router.process_incoming_messages(transport_clone).await;
+        });
+
+        // Start background task to process incoming link events (LXMF over links)
+        // This mirrors Python LXMF's delivery_link_established + delivery_packet callbacks
+        let router = self.clone();
+        let transport_clone = transport.clone();
+        handle.spawn(async move {
+            router.process_incoming_link_events(transport_clone).await;
+        });
+
+        Ok(())
+    }
+
+    /// Process incoming LXMF messages from the transport.
+    ///
+    /// This method subscribes to the transport's received_data events and processes
+    /// any packets destined for registered LXMF delivery destinations.
+    async fn process_incoming_messages(&self, transport: Arc<tokio::sync::Mutex<Transport>>) {
+        let mut data_receiver = transport.lock().await.received_data_events();
+
+        trace!("Started listening for incoming data packets");
+
+        while let Ok(received_data) = data_receiver.recv().await {
+            trace!(
+                "Received data packet for destination {}: {} bytes",
+                hex::encode(received_data.destination.as_slice()),
+                received_data.data.len()
+            );
+
+            // Check if this packet is for one of our delivery destinations
+            let delivery_destinations = self.inner.delivery_destinations.lock().unwrap();
+            if delivery_destinations.contains_key(&received_data.destination) {
+                drop(delivery_destinations);
+
+                log::debug!(
+                    "Received LXMF packet for destination {}: {} bytes",
+                    hex::encode(received_data.destination.as_slice()),
+                    received_data.data.len()
+                );
+
+                // Process the LXMF message
+                if let Err(e) = self.process_inbound_lxmf_packet(received_data) {
+                    log::error!("Error processing LXMF packet: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Process incoming LXMF messages delivered over links.
+    ///
+    /// This mirrors Python LXMF's delivery_link_established() and delivery_packet() callbacks.
+    /// When a link is established to our delivery destination, this handler receives
+    /// data sent over that link and processes it as LXMF messages.
+    ///
+    /// References Python LXMF/LXMF.py:
+    /// - LXMRouter.delivery_link_established() - sets up packet callback on link
+    /// - LXMRouter.delivery_packet() - processes incoming LXMF packets over link
+    async fn process_incoming_link_events(&self, transport: Arc<tokio::sync::Mutex<Transport>>) {
+        let mut link_receiver = transport.lock().await.in_link_events();
+
+        trace!("Started listening for incoming link events");
+
+        while let Ok(link_event_data) = link_receiver.recv().await {
+            trace!(
+                "Received link event: link_id={}, dest={}, event_type={:?}",
+                link_event_data.id,
+                hex::encode(link_event_data.address_hash.as_slice()),
+                match &link_event_data.event {
+                    LinkEvent::Activated => "Activated",
+                    LinkEvent::Data(_) => "Data",
+                    LinkEvent::Closed => "Closed",
+                    LinkEvent::Resource(_) => "Resource",
+                }
+            );
+
+            match link_event_data.event {
+                LinkEvent::Activated => {
+                    log::info!(
+                        "Incoming link {} activated for destination {}",
+                        link_event_data.id,
+                        hex::encode(link_event_data.address_hash.as_slice())
+                    );
+
+                    // Check if this link is for one of our delivery destinations
+                    let delivery_destinations = self.inner.delivery_destinations.lock().unwrap();
+                    if delivery_destinations.contains_key(&link_event_data.address_hash) {
+                        log::debug!(
+                            "Link {} is for registered LXMF delivery destination",
+                            link_event_data.id
+                        );
+                    }
+                }
+                LinkEvent::Data(payload) => {
+                    // Check if this link is for one of our delivery destinations
+                    let delivery_destinations = self.inner.delivery_destinations.lock().unwrap();
+                    if delivery_destinations.contains_key(&link_event_data.address_hash) {
+                        drop(delivery_destinations);
+
+                        log::debug!(
+                            "Received LXMF data over link {} for destination {}: {} bytes",
+                            link_event_data.id,
+                            hex::encode(link_event_data.address_hash.as_slice()),
+                            payload.len()
+                        );
+
+                        // Process the LXMF message from link data
+                        // For link delivery, the payload contains the full LXMF message
+                        // (destination hash prepended, like single packet delivery)
+                        match self.process_inbound_lxmf_link_data(
+                            link_event_data.address_hash,
+                            payload.as_slice(),
+                        ) {
+                            Ok(()) => {
+                                // TODO: Send delivery receipt/proof to sender
+                                //
+                                // Python LXMF calls packet.prove() which sends a signed hash
+                                // back to the sender. This requires:
+                                // 1. Access to the original packet hash (not available in LinkEvent::Data)
+                                // 2. Link::prove_packet() method in Reticulum-rs (not yet implemented)
+                                //
+                                // For now, delivery confirmation relies on Resource-based delivery
+                                // where ResourceManager automatically sends ResourceProof.
+                                //
+                                // See: Python LXMF LXMRouter.delivery_packet() -> packet.prove()
+                                // See: Python RNS Link.prove_packet() for proof format
+                                log::debug!(
+                                    "Successfully processed LXMF message over link {} - delivery receipt not yet implemented",
+                                    link_event_data.id
+                                );
+                            }
+                            Err(e) => {
+                                log::error!("Error processing LXMF link data: {}", e);
+                            }
+                        }
+                    }
+                }
+                LinkEvent::Closed => {
+                    log::debug!("Link {} closed", link_event_data.id);
+                    self.inner
+                        .resource_managers
+                        .lock()
+                        .unwrap()
+                        .remove(&link_event_data.id);
+                    self.set_peer_state(link_event_data.address_hash, PeerState::Idle);
+                }
+                LinkEvent::Resource(resource_packet) => {
+                    let is_delivery_destination = {
+                        let delivery_destinations =
+                            self.inner.delivery_destinations.lock().unwrap();
+                        delivery_destinations.contains_key(&link_event_data.address_hash)
+                    };
+                    if !is_delivery_destination {
+                        continue;
+                    }
+
+                    let Some(manager) = self
+                        .get_or_create_resource_manager(&transport, link_event_data.id)
+                        .await
+                    else {
+                        warn!(
+                            "Unable to handle resource event on link {}: link handle missing",
+                            link_event_data.id
+                        );
+                        continue;
+                    };
+
+                    let transport_clone = {
+                        let guard = transport.lock().await;
+                        guard.clone()
+                    };
+
+                    debug!(
+                        "Processing resource packet: type={:?}, context={:?}, payload_len={}",
+                        resource_packet.packet_type,
+                        resource_packet.context,
+                        resource_packet.payload.len()
+                    );
+
+                    let events = {
+                        let mut guard = manager.lock().await;
+                        guard
+                            .handle_packet(&transport_clone, &resource_packet)
+                            .await
+                    };
+
+                    debug!(
+                        "Resource handle_packet returned: {:?}",
+                        events.as_ref().map(|e| e.len())
+                    );
+
+                    match events {
+                        Ok(events) => {
+                            for event in events.iter() {
+                                if let ResourceEvent::IncomingComplete { hash, data } = event {
+                                    info!(
+                                        "Resource {} complete on link {} ({} bytes)",
+                                        hex::encode(hash.as_slice()),
+                                        link_event_data.id,
+                                        data.len()
+                                    );
+                                }
+                            }
+                            if let Err(err) =
+                                self.handle_resource_events(link_event_data.address_hash, events)
+                            {
+                                error!(
+                                    "Failed processing LXMF resource for {}: {}",
+                                    hex::encode(link_event_data.address_hash.as_slice()),
+                                    err
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            error!(
+                                "Resource manager error on link {} (dest {}): {:?}",
+                                link_event_data.id,
+                                hex::encode(link_event_data.address_hash.as_slice()),
+                                err
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn get_or_create_resource_manager(
+        &self,
+        transport: &Arc<tokio::sync::Mutex<Transport>>,
+        link_id: AddressHash,
+    ) -> Option<Arc<tokio::sync::Mutex<ResourceManager>>> {
+        if let Some(manager) = self.inner.resource_managers.lock().unwrap().get(&link_id) {
+            return Some(manager.clone());
+        }
+
+        let link = {
+            let guard = transport.lock().await;
+            guard.find_in_link(&link_id).await
+        };
+
+        let link = match link {
+            Some(link) => link,
+            None => return None,
+        };
+
+        let mut manager = ResourceManager::new(link);
+        manager.set_strategy(ResourceStrategy::AcceptAll);
+        let manager = Arc::new(tokio::sync::Mutex::new(manager));
+        self.inner
+            .resource_managers
+            .lock()
+            .unwrap()
+            .insert(link_id, manager.clone());
+        Some(manager)
+    }
+
+    fn handle_resource_events(
+        &self,
+        destination_hash: AddressHash,
+        events: Vec<ResourceEvent>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for event in events {
+            match event {
+                ResourceEvent::IncomingAccepted { hash, total_size } => {
+                    info!(
+                        "Accepted resource {} for destination {} ({} bytes) - ResourceRequest should have been sent",
+                        hex::encode(hash.as_slice()),
+                        hex::encode(destination_hash.as_slice()),
+                        total_size
+                    );
+                    self.set_peer_state(destination_hash, PeerState::ResourceTransferring);
+                }
+                ResourceEvent::IncomingProgress {
+                    hash,
+                    received_parts,
+                    total_parts,
+                } => {
+                    let percent = if total_parts == 0 {
+                        0.0
+                    } else {
+                        (received_parts as f64 / total_parts as f64) * 100.0
+                    };
+                    trace!(
+                        "Resource {} progress {}/{} ({:.1}%) for destination {}",
+                        hex::encode(hash.as_slice()),
+                        received_parts,
+                        total_parts,
+                        percent,
+                        hex::encode(destination_hash.as_slice())
+                    );
+                    if log::log_enabled!(log::Level::Info) {
+                        info!(
+                            "Resource {} now at {}/{} parts ({:.1}%) for {}",
+                            hex::encode(hash.as_slice()),
+                            received_parts,
+                            total_parts,
+                            percent,
+                            hex::encode(destination_hash.as_slice())
+                        );
+                    }
+                }
+                ResourceEvent::IncomingComplete { hash, data } => {
+                    info!(
+                        "Resource {} complete for destination {} ({} bytes)",
+                        hex::encode(hash.as_slice()),
+                        hex::encode(destination_hash.as_slice()),
+                        data.len()
+                    );
+                    self.set_peer_state(destination_hash, PeerState::LinkReady);
+                    self.process_inbound_lxmf_link_data(destination_hash, &data)?;
+                }
+                ResourceEvent::OutgoingComplete { hash } => {
+                    trace!(
+                        "Outgoing resource {} completed proof exchange",
+                        hex::encode(hash.as_slice())
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn set_peer_state(&self, destination_hash: AddressHash, state: PeerState) {
+        if let Some(peer) = self.inner.peers.lock().unwrap().get_mut(&destination_hash) {
+            peer.set_state(state);
+        }
+    }
+
+    /// Process inbound LXMF data received over a link.
+    ///
+    /// References Python LXMF/LXMF.py LXMRouter.delivery_packet()
+    ///
+    /// For DIRECT (link) delivery, Python LXMF sends the complete packed message
+    /// including the destination hash. This is different from OPPORTUNISTIC (single packet)
+    /// delivery where the destination hash is stripped by the sender and prepended by the receiver.
+    ///
+    /// See Python LXMF LXMessage.__as_packet():
+    /// - OPPORTUNISTIC: sends self.packed[DESTINATION_LENGTH:] (strips dest hash)
+    /// - DIRECT: sends self.packed (includes dest hash)
+    fn process_inbound_lxmf_link_data(
+        &self,
+        _destination_hash: AddressHash,
+        payload: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // For DIRECT (link) delivery, the payload already contains the full LXMF message:
+        // destination_hash (16) + source_hash (16) + signature (64) + msgpack_payload
+        // Do NOT prepend destination_hash - it's already included!
+        let lxmf_bytes = payload;
+
+        log::debug!(
+            "Unpacking LXMF message from link ({} bytes)",
+            lxmf_bytes.len()
+        );
+
+        // Unpack the LXMF message
+        let message = LXMessage::unpack_from_bytes(lxmf_bytes)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+
+        log::info!(
+            "Successfully unpacked LXMF message from {} (via link)",
+            hex::encode(message.source_hash().as_slice())
+        );
+
+        // Trigger the delivery callback
+        self.trigger_delivery_callback(&message);
+
+        Ok(())
+    }
+
+    /// Process an inbound LXMF packet.
+    ///
+    /// Unpacks the LXMF message and triggers the delivery callback.
+    fn process_inbound_lxmf_packet(
+        &self,
+        received_data: reticulum::transport::ReceivedData,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use reticulum::hash::ADDRESS_HASH_SIZE;
+
+        // The received data should be an LXMF message payload
+        // For Direct/Opportunistic delivery, the destination hash is already stripped by transport
+        // We need to reconstruct the full LXMF bytes by prepending the destination hash
+
+        let destination_hash = received_data.destination;
+        let payload = received_data.data.as_slice();
+
+        // Reconstruct full LXMF message bytes: destination_hash + payload
+        let mut lxmf_bytes = Vec::with_capacity(ADDRESS_HASH_SIZE + payload.len());
+        lxmf_bytes.extend_from_slice(destination_hash.as_slice());
+        lxmf_bytes.extend_from_slice(payload);
+
+        log::debug!("Unpacking LXMF message ({} bytes)", lxmf_bytes.len());
+
+        // Unpack the LXMF message
+        let message = LXMessage::unpack_from_bytes(&lxmf_bytes)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+
+        log::info!(
+            "Successfully unpacked LXMF message from {}",
+            hex::encode(message.source_hash().as_slice())
+        );
+
+        // Trigger the delivery callback
+        self.trigger_delivery_callback(&message);
+
         Ok(())
     }
 
@@ -770,7 +1314,11 @@ impl LxmRouter {
     /// For guaranteed handler registration before use, prefer `attach_transport()`.
     ///
     /// References Python LXMF/LXMF.py LXMRouter.__init__() handler registration
-    pub fn attach_transport_with_handle(&self, transport: Arc<Transport>, handle: Handle) {
+    pub fn attach_transport_with_handle(
+        &self,
+        transport: Arc<tokio::sync::Mutex<Transport>>,
+        handle: Handle,
+    ) {
         // Store transport and runtime handle
         *self.inner.transport.lock().unwrap() = Some(transport.clone());
         *self.inner.runtime_handle.lock().unwrap() = Some(handle.clone());
@@ -783,7 +1331,11 @@ impl LxmRouter {
         handle.spawn({
             let transport = transport.clone();
             async move {
-                transport.register_announce_handler(delivery_handler).await;
+                transport
+                    .lock()
+                    .await
+                    .register_announce_handler(delivery_handler)
+                    .await;
             }
         });
 
@@ -791,8 +1343,41 @@ impl LxmRouter {
             let transport = transport.clone();
             async move {
                 transport
+                    .lock()
+                    .await
                     .register_announce_handler(propagation_handler)
                     .await;
+            }
+        });
+
+        handle.spawn({
+            let router = self.clone();
+            let transport = transport.clone();
+            async move {
+                if let Err(err) = router
+                    .register_delivery_destinations_with_transport(transport)
+                    .await
+                {
+                    error!("Failed to register delivery destinations: {}", err);
+                }
+            }
+        });
+
+        // Start background task to process incoming LXMF messages (single packets)
+        handle.spawn({
+            let router = self.clone();
+            let transport = transport.clone();
+            async move {
+                router.process_incoming_messages(transport).await;
+            }
+        });
+
+        // Start background task to process incoming link events (LXMF over links)
+        handle.spawn({
+            let router = self.clone();
+            let transport = transport.clone();
+            async move {
+                router.process_incoming_link_events(transport).await;
             }
         });
 
@@ -833,10 +1418,7 @@ impl LxmRouter {
             dest.inbound_stamp_cost = stamp_cost;
             Ok(())
         } else {
-            Err(RouterError::InvalidHashLength {
-                expected: ADDRESS_HASH_SIZE,
-                got: destination_hash.as_slice().len(),
-            })
+            Err(RouterError::UnknownDeliveryDestination(destination_hash))
         }
     }
 
@@ -1213,10 +1795,11 @@ impl LxmRouter {
     }
 
     async fn send_outbound_message(
-        transport: Arc<Transport>,
+        transport: Arc<tokio::sync::Mutex<Transport>>,
         destination: AddressHash,
         payload: Vec<u8>,
     ) -> Result<DispatchOutcome, RnsError> {
+        let transport = transport.lock().await;
         if !transport.has_path(&destination).await {
             transport.request_path(&destination, None).await;
             return Ok(DispatchOutcome::AwaitingPath);
@@ -1622,6 +2205,7 @@ impl RouterInner {
 
             direct_links: Mutex::new(HashMap::new()),
             backchannel_links: Mutex::new(HashMap::new()),
+            resource_managers: Mutex::new(HashMap::new()),
 
             delivery_destinations: Mutex::new(HashMap::new()),
 

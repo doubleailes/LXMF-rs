@@ -22,7 +22,9 @@ pub struct LxPayload {
     pub content: Vec<u8>,
 
     /// Additional structured data (attachments, metadata, etc.)
-    pub fields: IndexMap<String, Vec<u8>>,
+    /// Keys are LXMF field identifiers (u8), e.g., FIELD_TICKET = 0x0C
+    /// Values are raw MessagePack-encoded data
+    pub fields: IndexMap<u8, Vec<u8>>,
 }
 
 impl LxPayload {
@@ -53,7 +55,7 @@ impl LxPayload {
         timestamp: f64,
         title: Vec<u8>,
         content: Vec<u8>,
-        fields: IndexMap<String, Vec<u8>>,
+        fields: IndexMap<u8, Vec<u8>>,
     ) -> Self {
         Self {
             timestamp,
@@ -103,14 +105,16 @@ impl LxPayload {
         String::from_utf8(self.content.clone())
     }
 
-    /// Set a field value
-    pub fn set_field(&mut self, key: String, value: Vec<u8>) {
+    /// Set a field value by integer key (LXMF field ID)
+    /// Keys are defined in Python LXMF/LXMF.py, e.g., FIELD_TICKET = 0x0C
+    /// Values should be raw MessagePack-encoded data
+    pub fn set_field(&mut self, key: u8, value: Vec<u8>) {
         self.fields.insert(key, value);
     }
 
-    /// Get a field value
-    pub fn get_field(&self, key: &str) -> Option<&Vec<u8>> {
-        self.fields.get(key)
+    /// Get a field value by integer key (LXMF field ID)
+    pub fn get_field(&self, key: u8) -> Option<&Vec<u8>> {
+        self.fields.get(&key)
     }
 }
 
@@ -157,11 +161,11 @@ mod tests {
     #[test]
     fn test_fields_operations() {
         let mut payload = LxPayload::new(1234567890.0, String::new(), String::new());
-        payload.set_field("key1".to_string(), b"value1".to_vec());
-        payload.set_field("key2".to_string(), b"value2".to_vec());
+        payload.set_field(1, b"value1".to_vec());
+        payload.set_field(2, b"value2".to_vec());
 
-        assert_eq!(payload.get_field("key1"), Some(&b"value1".to_vec()));
-        assert_eq!(payload.get_field("key2"), Some(&b"value2".to_vec()));
-        assert_eq!(payload.get_field("nonexistent"), None);
+        assert_eq!(payload.get_field(1), Some(&b"value1".to_vec()));
+        assert_eq!(payload.get_field(2), Some(&b"value2".to_vec()));
+        assert_eq!(payload.get_field(3), None);
     }
 }

@@ -21,8 +21,12 @@ thiserror = "1.0"
 
 [dependencies.reticulum]
 git = "https://github.com/doubleailes/Reticulum-rs"
-branch = "LXMF"
+branch = "copilot/fix-filter-duplicate-packets-again"
 
 [[example]]
 name = "sender"
 path = "examples/sender.rs"
+
+[[example]]
+name = "receiver"
+path = "examples/receiver.rs"

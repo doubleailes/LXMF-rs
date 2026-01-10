@@ -1,6 +1,7 @@
 use std::{error::Error, fmt};
 
-use reticulum::error::RnsError;
+use hex;
+use reticulum::{error::RnsError, hash::AddressHash};
 
 /// Router-level errors.
 #[derive(Debug)]
@@ -9,6 +10,7 @@ pub enum RouterError {
     DuplicateDeliveryIdentity,
     StampCostOutOfRange(u32),
     InvalidHashLength { expected: usize, got: usize },
+    UnknownDeliveryDestination(AddressHash),
     RuntimeUnavailable(String),
     DispatchThreadPanicked,
     NoTransportAttached,
@@ -39,6 +41,11 @@ impl fmt::Display for RouterError {
                 f,
                 "Invalid hash length: expected {} bytes, got {} bytes",
                 expected, got
+            ),
+            RouterError::UnknownDeliveryDestination(hash) => write!(
+                f,
+                "Delivery destination {} is not registered",
+                hex::encode(hash.as_slice())
             ),
             RouterError::RuntimeUnavailable(reason) => {
                 write!(f, "Tokio runtime unavailable: {}", reason)
