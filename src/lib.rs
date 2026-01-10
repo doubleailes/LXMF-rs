@@ -1,7 +1,7 @@
 mod message;
 pub use message::{LXMessage, UnverifiedReason, ValidMethod};
 mod peer;
-pub use peer::{LxmPeer, PeerError, PeerMetadata, SyncStrategy};
+pub use peer::{LxmPeer, PeerError, PeerMetadata, PeerState, SyncStrategy};
 pub mod router;
 pub use router::{
     APP_NAME, LXMFDeliveryAnnounceHandler, LXMFPropagationAnnounceHandler, LxmRouter,

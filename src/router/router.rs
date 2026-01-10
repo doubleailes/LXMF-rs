@@ -28,13 +28,14 @@ use reticulum::{
     hash::{ADDRESS_HASH_SIZE, AddressHash},
     identity::PrivateIdentity,
     packet::PacketContext,
+    resource::{ResourceEvent, ResourceManager, ResourceStrategy},
     transport::Transport,
 };
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 
 use crate::{
-    LXMessage, LxmPeer, PeerMetadata, SyncStrategy,
+    LXMessage, LxmPeer, PeerMetadata, PeerState, SyncStrategy,
     message::{
         MessageError,
         message::State,
@@ -521,7 +522,7 @@ pub(crate) struct RouterInner {
     identity: PrivateIdentity,
     cfg: RouterConfig,
     paths: RouterPaths,
-    transport: Mutex<Option<Arc<Transport>>>,
+    transport: Mutex<Option<Arc<tokio::sync::Mutex<Transport>>>>,
     runtime_handle: Mutex<Option<Handle>>,
 
     pending_inbound: Mutex<VecDeque<Vec<u8>>>,
@@ -530,6 +531,7 @@ pub(crate) struct RouterInner {
 
     direct_links: Mutex<HashMap<AddressHash, ()>>,
     backchannel_links: Mutex<HashMap<AddressHash, ()>>,
+    resource_managers: Mutex<HashMap<AddressHash, Arc<tokio::sync::Mutex<ResourceManager>>>>,
 
     delivery_destinations: Mutex<HashMap<AddressHash, DeliveryDestination>>,
 
@@ -731,6 +733,8 @@ impl LxmRouter {
 
         let app_data = self.get_announce_app_data(destination_hash);
         transport
+            .lock()
+            .await
             .send_announce(&input_destination, app_data.as_deref())
             .await;
 
@@ -743,7 +747,7 @@ impl LxmRouter {
 
     async fn register_delivery_destinations_with_transport(
         &self,
-        transport: Arc<Transport>,
+        transport: Arc<tokio::sync::Mutex<Transport>>,
     ) -> Result<(), RouterError> {
         let destination_hashes: Vec<AddressHash> = {
             let map = self.inner.delivery_destinations.lock().unwrap();
@@ -768,7 +772,7 @@ impl LxmRouter {
 
     async fn ensure_registered_destination(
         &self,
-        transport: &Arc<Transport>,
+        transport: &Arc<tokio::sync::Mutex<Transport>>,
         destination_hash: AddressHash,
     ) -> Result<Arc<tokio::sync::Mutex<SingleInputDestination>>, RouterError> {
         if let Some(existing) = self
@@ -800,8 +804,10 @@ impl LxmRouter {
             hex::encode(identity.as_identity().verifying_key.as_bytes())
         );
 
-        let mut transport_handle = transport.as_ref().clone();
-        let registered = transport_handle
+        // Use the mutex to get mutable access without cloning
+        let registered = transport
+            .lock()
+            .await
             .add_destination(
                 identity.clone(),
                 DestinationName::new(APP_NAME, DELIVERY_ASPECT),
@@ -859,7 +865,10 @@ impl LxmRouter {
     /// so they can receive incoming LXMF messages.
     ///
     /// References Python LXMF/LXMF.py LXMRouter.__init__() handler registration
-    pub async fn attach_transport(&self, transport: Arc<Transport>) -> Result<(), RouterError> {
+    pub async fn attach_transport(
+        &self,
+        transport: Arc<tokio::sync::Mutex<Transport>>,
+    ) -> Result<(), RouterError> {
         let handle = Handle::try_current()
             .map_err(|err| RouterError::RuntimeUnavailable(err.to_string()))?;
 
@@ -871,8 +880,14 @@ impl LxmRouter {
         let delivery_handler = LXMFDeliveryAnnounceHandler::new(self.clone());
         let propagation_handler = LXMFPropagationAnnounceHandler::new(self.clone());
 
-        transport.register_announce_handler(delivery_handler).await;
         transport
+            .lock()
+            .await
+            .register_announce_handler(delivery_handler)
+            .await;
+        transport
+            .lock()
+            .await
             .register_announce_handler(propagation_handler)
             .await;
 
@@ -903,8 +918,8 @@ impl LxmRouter {
     ///
     /// This method subscribes to the transport's received_data events and processes
     /// any packets destined for registered LXMF delivery destinations.
-    async fn process_incoming_messages(&self, transport: Arc<Transport>) {
-        let mut data_receiver = transport.received_data_events();
+    async fn process_incoming_messages(&self, transport: Arc<tokio::sync::Mutex<Transport>>) {
+        let mut data_receiver = transport.lock().await.received_data_events();
 
         trace!("Started listening for incoming data packets");
 
@@ -943,8 +958,8 @@ impl LxmRouter {
     /// References Python LXMF/LXMF.py:
     /// - LXMRouter.delivery_link_established() - sets up packet callback on link
     /// - LXMRouter.delivery_packet() - processes incoming LXMF packets over link
-    async fn process_incoming_link_events(&self, transport: Arc<Transport>) {
-        let mut link_receiver = transport.in_link_events();
+    async fn process_incoming_link_events(&self, transport: Arc<tokio::sync::Mutex<Transport>>) {
+        let mut link_receiver = transport.lock().await.in_link_events();
 
         trace!("Started listening for incoming link events");
 
@@ -1004,16 +1019,181 @@ impl LxmRouter {
                 }
                 LinkEvent::Closed => {
                     log::debug!("Link {} closed", link_event_data.id);
+                    self.inner
+                        .resource_managers
+                        .lock()
+                        .unwrap()
+                        .remove(&link_event_data.id);
+                    self.set_peer_state(link_event_data.address_hash, PeerState::Idle);
                 }
-                LinkEvent::Resource(_) => {
-                    // TODO: Handle resource transfers over links
-                    // This is used for larger LXMF messages that don't fit in a single packet
-                    log::debug!(
-                        "Link {} resource event (not yet implemented)",
-                        link_event_data.id
+                LinkEvent::Resource(resource_packet) => {
+                    let is_delivery_destination = {
+                        let delivery_destinations =
+                            self.inner.delivery_destinations.lock().unwrap();
+                        delivery_destinations.contains_key(&link_event_data.address_hash)
+                    };
+                    if !is_delivery_destination {
+                        continue;
+                    }
+
+                    let Some(manager) = self
+                        .get_or_create_resource_manager(&transport, link_event_data.id)
+                        .await
+                    else {
+                        warn!(
+                            "Unable to handle resource event on link {}: link handle missing",
+                            link_event_data.id
+                        );
+                        continue;
+                    };
+
+                    let transport_clone = {
+                        let guard = transport.lock().await;
+                        guard.clone()
+                    };
+
+                    let events = {
+                        let mut guard = manager.lock().await;
+                        guard
+                            .handle_packet(&transport_clone, &resource_packet)
+                            .await
+                    };
+
+                    match events {
+                        Ok(events) => {
+                            for event in events.iter() {
+                                if let ResourceEvent::IncomingComplete { hash, data } = event {
+                                    info!(
+                                        "Resource {} complete on link {} ({} bytes)",
+                                        hex::encode(hash.as_slice()),
+                                        link_event_data.id,
+                                        data.len()
+                                    );
+                                }
+                            }
+                            if let Err(err) =
+                                self.handle_resource_events(link_event_data.address_hash, events)
+                            {
+                                error!(
+                                    "Failed processing LXMF resource for {}: {}",
+                                    hex::encode(link_event_data.address_hash.as_slice()),
+                                    err
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            error!(
+                                "Resource manager error on link {} (dest {}): {:?}",
+                                link_event_data.id,
+                                hex::encode(link_event_data.address_hash.as_slice()),
+                                err
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn get_or_create_resource_manager(
+        &self,
+        transport: &Arc<tokio::sync::Mutex<Transport>>,
+        link_id: AddressHash,
+    ) -> Option<Arc<tokio::sync::Mutex<ResourceManager>>> {
+        if let Some(manager) = self.inner.resource_managers.lock().unwrap().get(&link_id) {
+            return Some(manager.clone());
+        }
+
+        let link = {
+            let guard = transport.lock().await;
+            guard.find_in_link(&link_id).await
+        };
+
+        let link = match link {
+            Some(link) => link,
+            None => return None,
+        };
+
+        let mut manager = ResourceManager::new(link);
+        manager.set_strategy(ResourceStrategy::AcceptAll);
+        let manager = Arc::new(tokio::sync::Mutex::new(manager));
+        self.inner
+            .resource_managers
+            .lock()
+            .unwrap()
+            .insert(link_id, manager.clone());
+        Some(manager)
+    }
+
+    fn handle_resource_events(
+        &self,
+        destination_hash: AddressHash,
+        events: Vec<ResourceEvent>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for event in events {
+            match event {
+                ResourceEvent::IncomingAccepted { hash, total_size } => {
+                    debug!(
+                        "Accepted resource {} for destination {} ({} bytes)",
+                        hex::encode(hash.as_slice()),
+                        hex::encode(destination_hash.as_slice()),
+                        total_size
+                    );
+                    self.set_peer_state(destination_hash, PeerState::ResourceTransferring);
+                }
+                ResourceEvent::IncomingProgress {
+                    hash,
+                    received_parts,
+                    total_parts,
+                } => {
+                    let percent = if total_parts == 0 {
+                        0.0
+                    } else {
+                        (received_parts as f64 / total_parts as f64) * 100.0
+                    };
+                    trace!(
+                        "Resource {} progress {}/{} ({:.1}%) for destination {}",
+                        hex::encode(hash.as_slice()),
+                        received_parts,
+                        total_parts,
+                        percent,
+                        hex::encode(destination_hash.as_slice())
+                    );
+                    if log::log_enabled!(log::Level::Info) {
+                        info!(
+                            "Resource {} now at {}/{} parts ({:.1}%) for {}",
+                            hex::encode(hash.as_slice()),
+                            received_parts,
+                            total_parts,
+                            percent,
+                            hex::encode(destination_hash.as_slice())
+                        );
+                    }
+                }
+                ResourceEvent::IncomingComplete { hash, data } => {
+                    info!(
+                        "Resource {} complete for destination {} ({} bytes)",
+                        hex::encode(hash.as_slice()),
+                        hex::encode(destination_hash.as_slice()),
+                        data.len()
+                    );
+                    self.set_peer_state(destination_hash, PeerState::LinkReady);
+                    self.process_inbound_lxmf_link_data(destination_hash, &data)?;
+                }
+                ResourceEvent::OutgoingComplete { hash } => {
+                    trace!(
+                        "Outgoing resource {} completed proof exchange",
+                        hex::encode(hash.as_slice())
                     );
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn set_peer_state(&self, destination_hash: AddressHash, state: PeerState) {
+        if let Some(peer) = self.inner.peers.lock().unwrap().get_mut(&destination_hash) {
+            peer.set_state(state);
         }
     }
 
@@ -1097,7 +1277,11 @@ impl LxmRouter {
     /// For guaranteed handler registration before use, prefer `attach_transport()`.
     ///
     /// References Python LXMF/LXMF.py LXMRouter.__init__() handler registration
-    pub fn attach_transport_with_handle(&self, transport: Arc<Transport>, handle: Handle) {
+    pub fn attach_transport_with_handle(
+        &self,
+        transport: Arc<tokio::sync::Mutex<Transport>>,
+        handle: Handle,
+    ) {
         // Store transport and runtime handle
         *self.inner.transport.lock().unwrap() = Some(transport.clone());
         *self.inner.runtime_handle.lock().unwrap() = Some(handle.clone());
@@ -1110,7 +1294,11 @@ impl LxmRouter {
         handle.spawn({
             let transport = transport.clone();
             async move {
-                transport.register_announce_handler(delivery_handler).await;
+                transport
+                    .lock()
+                    .await
+                    .register_announce_handler(delivery_handler)
+                    .await;
             }
         });
 
@@ -1118,6 +1306,8 @@ impl LxmRouter {
             let transport = transport.clone();
             async move {
                 transport
+                    .lock()
+                    .await
                     .register_announce_handler(propagation_handler)
                     .await;
             }
@@ -1568,10 +1758,11 @@ impl LxmRouter {
     }
 
     async fn send_outbound_message(
-        transport: Arc<Transport>,
+        transport: Arc<tokio::sync::Mutex<Transport>>,
         destination: AddressHash,
         payload: Vec<u8>,
     ) -> Result<DispatchOutcome, RnsError> {
+        let transport = transport.lock().await;
         if !transport.has_path(&destination).await {
             transport.request_path(&destination, None).await;
             return Ok(DispatchOutcome::AwaitingPath);
@@ -1977,6 +2168,7 @@ impl RouterInner {
 
             direct_links: Mutex::new(HashMap::new()),
             backchannel_links: Mutex::new(HashMap::new()),
+            resource_managers: Mutex::new(HashMap::new()),
 
             delivery_destinations: Mutex::new(HashMap::new()),
 

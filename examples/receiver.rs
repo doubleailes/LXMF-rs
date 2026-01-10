@@ -93,7 +93,6 @@ async fn main() {
 
     // Create router with storage path
     let mut router_config = RouterConfig::new("/tmp/lxmf_receiver");
-    router_config.enforce_stamps = ENFORCE_STAMPS;
 
     // Create a new identity for this receiver
     let mut rng = OsRng;
@@ -110,14 +109,17 @@ async fn main() {
 
     // Register delivery identity with display name and stamp cost
     let display_name = Some("Anonymous Peer".to_string());
-    let my_lxmf_destination =
-        match router.register_delivery_identity(None, display_name, Some(REQUIRED_STAMP_COST)) {
-            Ok(dest_hash) => dest_hash,
-            Err(err) => {
-                log::error!("Could not register delivery identity: {}", err);
-                return;
-            }
-        };
+    let my_lxmf_destination = match router.register_delivery_identity(
+        Some(identity.clone()),
+        display_name,
+        Some(REQUIRED_STAMP_COST),
+    ) {
+        Ok(dest_hash) => dest_hash,
+        Err(err) => {
+            log::error!("Could not register delivery identity: {}", err);
+            return;
+        }
+    };
 
     // Register delivery callback
     router.register_delivery_callback(delivery_callback);
@@ -127,8 +129,30 @@ async fn main() {
         hex::encode(my_lxmf_destination.as_slice())
     );
 
-    // Create and attach transport
-    let transport = Arc::new(Transport::new(TransportConfig::default()));
+    // Create transport wrapped in Arc<Mutex> for proper mutable access
+    let transport = Arc::new(tokio::sync::Mutex::new(Transport::new(
+        TransportConfig::default(),
+    )));
+
+    // IMPORTANT: Subscribe to iface_rx BEFORE spawning the interface
+    // This ensures we don't miss any packets due to broadcast channel timing
+    let mut iface_rx = transport.lock().await.iface_rx();
+    tokio::spawn(async move {
+        log::info!("Started raw interface packet monitor");
+        while let Ok(rx_message) = iface_rx.recv().await {
+            let packet = &rx_message.packet;
+            log::info!(
+                "RAW IFACE RX: iface={}, dest={}, type={:?}, ctx={:?}, hops={}, data_len={}",
+                rx_message.address,
+                packet.destination,
+                packet.header.packet_type,
+                packet.context,
+                packet.header.hops,
+                packet.data.len()
+            );
+        }
+        log::warn!("Raw interface packet monitor ended");
+    });
 
     if let Err(err) = router.attach_transport(transport.clone()).await {
         log::error!("Failed to attach transport to router: {}", err);
@@ -139,41 +163,19 @@ async fn main() {
 
     // Spawn the network interface
     let _client_addr = transport
+        .lock()
+        .await
         .iface_manager()
         .lock()
         .await
         .spawn(TcpClient::new("127.0.0.1:4242"), TcpClient::spawn);
 
-    log::info!("Connected to Reticulum network");
+    log::info!("=== Connected to Reticulum network ===");
 
     // Send an initial announce so peers can discover us immediately
     match router.announce(my_lxmf_destination).await {
         Ok(()) => log::info!("Initial announce sent automatically"),
         Err(err) => log::error!("Failed to send initial announce: {}", err),
-    }
-
-    // The router's attach_transport already set up incoming message handling
-    // via the process_incoming_messages background task
-
-    // Add diagnostic logging for ALL raw interface packets
-    // This helps debug why link requests might not be reaching the transport handler
-    {
-        let mut iface_rx = transport.iface_rx();
-        tokio::spawn(async move {
-            log::info!("Started raw interface packet monitor");
-            while let Ok(rx_message) = iface_rx.recv().await {
-                let packet = &rx_message.packet;
-                log::trace!(
-                    "RAW IFACE RX: iface={}, dest={}, type={:?}, ctx={:?}, hops={}, data_len={}",
-                    rx_message.address,
-                    packet.destination,
-                    packet.header.packet_type,
-                    packet.context,
-                    packet.header.hops,
-                    packet.data.len()
-                );
-            }
-        });
     }
 
     // Interactive loop - press Enter to announce

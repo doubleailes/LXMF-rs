@@ -72,7 +72,9 @@ async fn main() {
         return;
     }
 
-    let transport = Arc::new(Transport::new(TransportConfig::default()));
+    let transport = Arc::new(tokio::sync::Mutex::new(Transport::new(
+        TransportConfig::default(),
+    )));
 
     // attach_transport() automatically registers LXMF announce handlers that
     // cache stamp costs from incoming announces. The router's prepare_outbound_message()
@@ -83,7 +85,7 @@ async fn main() {
     }
 
     // Spawn the network interface
-    let client_addr = transport.iface_manager().lock().await.spawn(
+    let client_addr = transport.lock().await.iface_manager().lock().await.spawn(
         TcpClient::new("amsterdam.connect.reticulum.network:4965"),
         TcpClient::spawn,
     );
@@ -94,23 +96,27 @@ async fn main() {
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        if transport.has_path(&destination_hash).await {
+        if transport.lock().await.has_path(&destination_hash).await {
             log::info!("Path found to {}", destination_hash);
 
             // Small delay to ensure announce handler has processed the stamp cost
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-            let destination_identity =
-                match transport.recall_identity(&destination_hash, false).await {
-                    Some(identity) => identity,
-                    None => {
-                        log::error!(
-                            "Transport does not know the destination identity for {}",
-                            destination_hash
-                        );
-                        return;
-                    }
-                };
+            let destination_identity = match transport
+                .lock()
+                .await
+                .recall_identity(&destination_hash, false)
+                .await
+            {
+                Some(identity) => identity,
+                None => {
+                    log::error!(
+                        "Transport does not know the destination identity for {}",
+                        destination_hash
+                    );
+                    return;
+                }
+            };
 
             let destination = SingleOutputDestination::new(
                 destination_identity,
@@ -123,6 +129,8 @@ async fn main() {
 
             // Announce ourselves
             transport
+                .lock()
+                .await
                 .send_direct(
                     client_addr,
                     source_destination.announce(OsRng, None).unwrap(),
@@ -161,7 +169,11 @@ async fn main() {
             log::info!("Outbound queue flushed. Message handed to transport.");
             break;
         } else {
-            transport.request_path(&destination_hash, None).await;
+            transport
+                .lock()
+                .await
+                .request_path(&destination_hash, None)
+                .await;
             log::info!(
                 "Requested path for {}. Waiting for announce...",
                 destination_hash
