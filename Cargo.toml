@@ -19,10 +19,16 @@ digest = "0.10"
 rand_chacha = { version = "0.3", optional = false }
 thiserror = "1.0"
 
+# For debugging, use local path:
 [dependencies.reticulum]
-git = "https://github.com/doubleailes/Reticulum-rs"
-branch = "LXMF"
+path = "../Reticulum-rs"
+# git = "https://github.com/doubleailes/Reticulum-rs"
+# branch = "copilot/fix-filter-duplicate-packets-again"
 
 [[example]]
 name = "sender"
 path = "examples/sender.rs"
+
+[[example]]
+name = "receiver"
+path = "examples/receiver.rs"

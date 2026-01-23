@@ -49,6 +49,7 @@ pub struct LXMFDeliveryAnnounceHandler {
 impl LXMFDeliveryAnnounceHandler {
     /// Create a new delivery announce handler for the given router.
     pub fn new(lxmrouter: LxmRouter) -> Self {
+        trace!("Creating LXMFDeliveryAnnounceHandler");
         Self {
             aspect_filter: format!("{}.{}", APP_NAME, DELIVERY_ASPECT),
             receive_path_responses: true,
@@ -64,6 +65,7 @@ impl LXMFDeliveryAnnounceHandler {
     ///
     /// References Python LXMF/LXMF.py LXMFDeliveryAnnounceHandler.stamp_costs
     pub fn get_stamp_cost(&self, destination_hash: &AddressHash) -> Option<u8> {
+        trace!("Getting stamp cost for {}", destination_hash);
         self.stamp_costs
             .lock()
             .unwrap()
@@ -142,6 +144,10 @@ impl LXMFDeliveryAnnounceHandler {
     ///
     /// Only triggers for messages with DIRECT or OPPORTUNISTIC delivery methods.
     fn trigger_outbound_for_destination(&self, destination_hash: AddressHash) {
+        trace!(
+            "Checking pending outbound messages for destination {}",
+            hex::encode(destination_hash.as_slice())
+        );
         let should_trigger = {
             let pending = self.lxmrouter.inner.pending_outbound.lock().unwrap();
             pending.iter().any(|msg| {
@@ -182,6 +188,7 @@ impl AnnounceHandler for LXMFDeliveryAnnounceHandler {
         destination: Arc<tokio::sync::Mutex<reticulum::destination::SingleOutputDestination>>,
         app_data: PacketDataBuffer,
     ) {
+        trace!("LXMFDeliveryAnnounceHandler: handle_announce called for destination");
         // Clone what we need for the spawned task
         let lxmrouter = self.lxmrouter.clone();
         let stamp_costs = self.stamp_costs.clone();
@@ -214,6 +221,7 @@ impl AnnounceHandler for LXMFDeliveryAnnounceHandler {
                     .insert(destination_hash, stamp_cost);
 
                 // Also update router's outbound stamp cost cache
+                #[allow(unused_must_use)]
                 lxmrouter.update_outbound_stamp_cost(destination_hash, stamp_cost);
             }
 
@@ -251,6 +259,7 @@ pub struct SharedDeliveryAnnounceHandler {
 impl SharedDeliveryAnnounceHandler {
     /// Create a new shared delivery announce handler.
     pub fn new(lxmrouter: LxmRouter) -> Self {
+        trace!("Creating SharedDeliveryAnnounceHandler");
         Self {
             inner: Arc::new(LXMFDeliveryAnnounceHandler::new(lxmrouter)),
         }
@@ -261,6 +270,10 @@ impl SharedDeliveryAnnounceHandler {
     /// Returns `Some(cost)` if a stamp cost has been discovered for this destination
     /// via an announce, or `None` if no stamp cost is known.
     pub fn get_stamp_cost(&self, destination_hash: &AddressHash) -> Option<u8> {
+        trace!(
+            "SharedDeliveryAnnounceHandler: get_stamp_cost called for {}",
+            hex::encode(destination_hash.as_slice())
+        );
         self.inner.get_stamp_cost(destination_hash)
     }
 
@@ -281,6 +294,7 @@ impl AnnounceHandler for SharedDeliveryAnnounceHandler {
         destination: Arc<tokio::sync::Mutex<reticulum::destination::SingleOutputDestination>>,
         app_data: PacketDataBuffer,
     ) {
+        trace!("SharedDeliveryAnnounceHandler: handle_announce called");
         self.inner.handle_announce(destination, app_data);
     }
 
