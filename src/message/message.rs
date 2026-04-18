@@ -6,16 +6,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::message::{LxPayload, MessageError};
-use ed25519_dalek::{SIGNATURE_LENGTH, Signature};
-use indexmap::IndexMap;
-use reticulum::{
-    destination::{SingleInputDestination, SingleOutputDestination},
-    hash::{ADDRESS_HASH_SIZE, AddressHash, Hash},
-    identity::Identity,
-    packet::DestinationType,
+use crate::compat::{
+    AddressHash, DestinationType, Hash, Identity, SingleInputDestination,
+    SingleOutputDestination, ADDRESS_HASH_SIZE, HASH_SIZE,
 };
+use crate::message::{LxPayload, MessageError};
+use indexmap::IndexMap;
 use rmp::{decode, encode};
+
+const SIGNATURE_LENGTH: usize = 64;
 
 const DESTINATION_LENGTH: usize = ADDRESS_HASH_SIZE;
 const ENCRYPTION_DESCRIPTION_AES: &str = "AES-128";
@@ -485,8 +484,7 @@ impl LXMessage {
             hashed_part(&payload_bytes, &self.destination_hash, &self.source_hash);
         let message_hash = Hash::new_from_slice(&hashed_part);
         hashed_part.extend_from_slice(message_hash.as_slice());
-        let signature =
-            Signature::from_slice(&signature_bytes).map_err(|_| MessageError::InvalidSignature)?;
+        let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
         identity
             .verify(&hashed_part, &signature)
             .map_err(|_| MessageError::InvalidSignature)?;
@@ -768,7 +766,7 @@ pub enum UnverifiedReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reticulum::{destination::DestinationName, hash::HASH_SIZE, identity::PrivateIdentity};
+    use crate::compat::{DestinationName, PrivateIdentity};
 
     fn sample_message() -> LXMessage {
         let sender = PrivateIdentity::new_from_name("sender");
@@ -907,7 +905,7 @@ mod tests {
     /// Python produces: 7dab36ed1047be956098ade44e1966b21ce8dd469648e711e43611c90790838f
     #[test]
     fn message_hash_matches_python() {
-        use reticulum::hash::Hash;
+        use crate::compat::Hash;
 
         // Use known input data
         let destination_hash = AddressHash::new([0u8; 16]);
@@ -970,7 +968,7 @@ mod tests {
     /// ```
     #[test]
     fn unpack_message_with_stamp_produces_same_hash() {
-        use reticulum::hash::HASH_SIZE;
+        use crate::compat::HASH_SIZE;
 
         // Build a packed message: dest_hash + src_hash + signature + payload_with_stamp
         let destination_hash = [0u8; 16];
@@ -1020,7 +1018,7 @@ mod tests {
         hashed_part_expected.extend_from_slice(&source_hash);
         hashed_part_expected.extend_from_slice(&payload_without_stamp);
 
-        use reticulum::hash::Hash;
+        use crate::compat::Hash;
         let expected_hash = Hash::new_from_slice(&hashed_part_expected);
 
         // Verify the unpacked message has the correct hash

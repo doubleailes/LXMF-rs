@@ -15,7 +15,7 @@ use std::{
 };
 
 use log::{error, trace, warn};
-use reticulum::{hash::AddressHash, packet::PacketDataBuffer, transport::AnnounceHandler};
+use crate::compat::{AddressHash, AnnounceHandler, PacketDataBuffer, SingleOutputDestination};
 
 use crate::{PeerMetadata, ValidMethod};
 
@@ -179,7 +179,7 @@ impl LXMFDeliveryAnnounceHandler {
 impl AnnounceHandler for LXMFDeliveryAnnounceHandler {
     fn handle_announce(
         &self,
-        destination: Arc<tokio::sync::Mutex<reticulum::destination::SingleOutputDestination>>,
+        destination: Arc<tokio::sync::Mutex<SingleOutputDestination>>,
         app_data: PacketDataBuffer,
     ) {
         // Clone what we need for the spawned task
@@ -278,7 +278,7 @@ impl SharedDeliveryAnnounceHandler {
 impl AnnounceHandler for SharedDeliveryAnnounceHandler {
     fn handle_announce(
         &self,
-        destination: Arc<tokio::sync::Mutex<reticulum::destination::SingleOutputDestination>>,
+        destination: Arc<tokio::sync::Mutex<SingleOutputDestination>>,
         app_data: PacketDataBuffer,
     ) {
         self.inner.handle_announce(destination, app_data);
@@ -426,7 +426,7 @@ impl LXMFPropagationAnnounceHandler {
 impl AnnounceHandler for LXMFPropagationAnnounceHandler {
     fn handle_announce(
         &self,
-        destination: Arc<tokio::sync::Mutex<reticulum::destination::SingleOutputDestination>>,
+        destination: Arc<tokio::sync::Mutex<SingleOutputDestination>>,
         app_data: PacketDataBuffer,
     ) {
         // Clone data needed for the spawned task

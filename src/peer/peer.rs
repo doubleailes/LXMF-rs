@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use indexmap::{IndexMap, IndexSet};
-use reticulum::hash::{ADDRESS_HASH_SIZE, AddressHash};
+use crate::compat::{ADDRESS_HASH_SIZE, AddressHash};
 use serde::{Deserialize, Serialize};
 
 use super::PeerError;

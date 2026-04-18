@@ -1,3 +1,4 @@
+pub mod compat;
 mod message;
 pub use message::{LXMessage, ValidMethod};
 mod peer;
