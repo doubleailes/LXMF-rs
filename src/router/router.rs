@@ -22,9 +22,10 @@ use std::{
 use log::{debug, error, info, trace, warn};
 use rand_core::OsRng;
 use crate::compat::{
-    AddressHash, DestinationName, PacketContext, PrivateIdentity, RnsError,
-    SingleOutputDestination, Transport, ADDRESS_HASH_SIZE,
+    AddressHash, DestinationName, PrivateIdentity, RnsError,
+    SingleOutputDestination, ADDRESS_HASH_SIZE,
 };
+use crate::transport::LxmfTransport;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 
@@ -39,7 +40,8 @@ use crate::{
 
 use super::error::RouterError;
 use super::handlers::{
-    LXMFDeliveryAnnounceHandler, LXMFPropagationAnnounceHandler, PropagationNodeAnnounceData,
+    PropagationNodeAnnounceData,
+    handle_delivery_announce, handle_propagation_announce,
 };
 
 pub const APP_NAME: &str = "lxmf";
@@ -516,7 +518,7 @@ pub(crate) struct RouterInner {
     identity: PrivateIdentity,
     cfg: RouterConfig,
     paths: RouterPaths,
-    transport: Mutex<Option<Arc<Transport>>>,
+    transport: Mutex<Option<Arc<LxmfTransport>>>,
     runtime_handle: Mutex<Option<Handle>>,
 
     pending_inbound: Mutex<VecDeque<Vec<u8>>>,
@@ -691,7 +693,7 @@ impl LxmRouter {
 
     /// Announce a registered delivery destination.
     ///
-    /// This sends an announce via the attached Reticulum transport with app_data
+    /// This sends an announce via the attached leviculum transport with app_data
     /// containing the display_name and stamp_cost (msgpack encoded).
     pub async fn announce(&self, destination_hash: AddressHash) -> Result<(), RouterError> {
         let transport = self
@@ -702,27 +704,13 @@ impl LxmRouter {
             .clone()
             .ok_or(RouterError::NoTransportAttached)?;
 
-        // Get the identity to create an input destination for announcing
-        let input_destination = {
-            let map = self.inner.delivery_destinations.lock().unwrap();
-            let dest = map.get(&destination_hash).ok_or({
-                RouterError::InvalidHashLength {
-                    expected: ADDRESS_HASH_SIZE,
-                    got: 0,
-                }
-            })?;
+        let app_data = self.get_announce_app_data(destination_hash);
 
-            // Create a SingleInputDestination from the stored identity
-            let input_dest = crate::compat::SingleInputDestination::new(
-                dest.identity.clone(),
-                DestinationName::new(APP_NAME, DELIVERY_ASPECT),
-            );
-            Arc::new(tokio::sync::Mutex::new(input_dest))
-        };
-
-        let _app_data = self.get_announce_app_data(destination_hash);
-        // TODO: Implement announce via leviculum transport
-        // transport.send_announce(&input_destination, app_data.as_deref()).await;
+        let dest_hash = destination_hash.to_destination_hash();
+        transport
+            .announce_destination(&dest_hash, app_data.as_deref())
+            .await
+            .map_err(|e| RouterError::TransportError(e.to_string()))?;
 
         info!(
             "Announced delivery destination {}",
@@ -731,67 +719,185 @@ impl LxmRouter {
         Ok(())
     }
 
-    /// Attach a Reticulum transport so queued LXMs can be forwarded automatically.
+    /// Attach a leviculum transport node so queued LXMs can be forwarded.
     ///
-    /// This also registers the LXMF announce handlers with the transport:
-    /// - `LXMFDeliveryAnnounceHandler` for "lxmf.delivery" announces
-    /// - `LXMFPropagationAnnounceHandler` for "lxmf.propagation" announces
+    /// This stores the transport reference, spawns an event processing loop
+    /// that handles announces, incoming links, resources, and packets
+    /// (replacing the old beetchat-style AnnounceHandler registration).
     ///
     /// References Python LXMF/LXMF.py LXMRouter.__init__() handler registration
-    pub async fn attach_transport(&self, transport: Arc<Transport>) -> Result<(), RouterError> {
+    pub async fn attach_transport(&self, transport: Arc<LxmfTransport>) -> Result<(), RouterError> {
         let handle = Handle::try_current()
             .map_err(|err| RouterError::RuntimeUnavailable(err.to_string()))?;
 
         // Store transport and runtime handle
         *self.inner.transport.lock().unwrap() = Some(transport.clone());
-        *self.inner.runtime_handle.lock().unwrap() = Some(handle);
+        *self.inner.runtime_handle.lock().unwrap() = Some(handle.clone());
 
-        // Register announce handlers like Python LXMF does in __init__
-        let delivery_handler = LXMFDeliveryAnnounceHandler::new(self.clone());
-        let propagation_handler = LXMFPropagationAnnounceHandler::new(self.clone());
+        // Spawn event processing loop (replaces register_announce_handler)
+        if let Some(mut event_rx) = transport.take_event_receiver().await {
+            let router = self.clone();
+            handle.spawn(async move {
+                Self::run_event_loop(&router, &mut event_rx).await;
+            });
+            debug!("Spawned LXMF event processing loop");
+        } else {
+            warn!("No event receiver available from transport (already taken?)");
+        }
 
-        transport.register_announce_handler(delivery_handler).await;
-        transport
-            .register_announce_handler(propagation_handler)
-            .await;
-
-        debug!("Registered LXMF announce handlers with transport");
+        debug!("Attached leviculum transport to LXMF router");
         Ok(())
     }
 
     /// Attach a transport using an explicit Tokio runtime handle (sync version).
-    ///
-    /// This spawns handler registration asynchronously without waiting.
-    /// For guaranteed handler registration before use, prefer `attach_transport()`.
-    ///
-    /// References Python LXMF/LXMF.py LXMRouter.__init__() handler registration
-    pub fn attach_transport_with_handle(&self, transport: Arc<Transport>, handle: Handle) {
-        // Store transport and runtime handle
+    pub fn attach_transport_with_handle(&self, transport: Arc<LxmfTransport>, handle: Handle) {
         *self.inner.transport.lock().unwrap() = Some(transport.clone());
         *self.inner.runtime_handle.lock().unwrap() = Some(handle.clone());
 
-        // Register announce handlers like Python LXMF does in __init__
-        // NOTE: This spawns asynchronously, handlers may not be registered immediately
-        let delivery_handler = LXMFDeliveryAnnounceHandler::new(self.clone());
-        let propagation_handler = LXMFPropagationAnnounceHandler::new(self.clone());
-
-        handle.spawn({
-            let transport = transport.clone();
-            async move {
-                transport.register_announce_handler(delivery_handler).await;
+        let router = self.clone();
+        let transport_clone = transport.clone();
+        handle.spawn(async move {
+            if let Some(mut event_rx) = transport_clone.take_event_receiver().await {
+                Self::run_event_loop(&router, &mut event_rx).await;
             }
         });
 
-        handle.spawn({
-            let transport = transport.clone();
-            async move {
-                transport
-                    .register_announce_handler(propagation_handler)
-                    .await;
-            }
-        });
+        debug!("Attached leviculum transport to LXMF router (sync)");
+    }
 
-        debug!("Registered LXMF announce handlers with transport");
+    /// Event processing loop — replaces the old AnnounceHandler trait system.
+    ///
+    /// Processes `NodeEvent`s from the leviculum transport and dispatches them
+    /// to the appropriate LXMF handling logic.
+    async fn run_event_loop(
+        router: &LxmRouter,
+        event_rx: &mut tokio::sync::mpsc::Receiver<reticulum_core::node::NodeEvent>,
+    ) {
+        use reticulum_core::Destination;
+        use reticulum_core::node::NodeEvent;
+
+        // Pre-compute name hashes for aspect matching
+        let delivery_name_hash =
+            Destination::compute_name_hash(APP_NAME, &[DELIVERY_ASPECT]);
+        let propagation_name_hash =
+            Destination::compute_name_hash(APP_NAME, &[PROPAGATION_ASPECT]);
+
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                NodeEvent::AnnounceReceived { announce, .. } => {
+                    let dest_hash = AddressHash::from_destination_hash(
+                        *announce.destination_hash(),
+                    );
+                    let app_data = announce.app_data();
+                    let name_hash = announce.name_hash();
+
+                    if *name_hash == delivery_name_hash {
+                        handle_delivery_announce(router, dest_hash, app_data);
+                    } else if *name_hash == propagation_name_hash {
+                        handle_propagation_announce(router, dest_hash, app_data, false);
+                    }
+                }
+                NodeEvent::LinkRequest { link_id, destination_hash, .. } => {
+                    // Accept incoming links for delivery/propagation destinations
+                    let addr = AddressHash::from_destination_hash(destination_hash);
+                    let is_delivery = router
+                        .inner
+                        .delivery_destinations
+                        .lock()
+                        .unwrap()
+                        .contains_key(&addr);
+                    let is_propagation = *router.inner.propagation_node.lock().unwrap();
+
+                    if is_delivery || is_propagation {
+                        let transport = router.inner.transport.lock().unwrap().clone();
+                        if let Some(transport) = transport {
+                            match transport.accept_link(&link_id).await {
+                                Ok(_handle) => {
+                                    debug!("Accepted incoming link {:?}", link_id);
+                                    // Set resource strategy to accept all on this link
+                                    let _ = transport.set_resource_strategy(
+                                        &link_id,
+                                        reticulum_core::resource::ResourceStrategy::AcceptAll,
+                                    ).await;
+                                }
+                                Err(e) => {
+                                    warn!("Failed to accept link {:?}: {}", link_id, e);
+                                }
+                            }
+                        }
+                    }
+                }
+                NodeEvent::LinkEstablished { link_id, is_initiator } => {
+                    debug!(
+                        "Link established: {:?} (initiator: {})",
+                        link_id, is_initiator
+                    );
+                }
+                NodeEvent::ResourceCompleted {
+                    link_id,
+                    data,
+                    metadata,
+                    is_sender,
+                    ..
+                } => {
+                    if !is_sender && !data.is_empty() {
+                        debug!(
+                            "Resource completed on link {:?}: {} bytes",
+                            link_id,
+                            data.len()
+                        );
+                        // Queue for inbound processing
+                        router
+                            .inner
+                            .pending_inbound
+                            .lock()
+                            .unwrap()
+                            .push_back(data);
+                    }
+                }
+                NodeEvent::PacketReceived {
+                    destination,
+                    data,
+                    ..
+                } => {
+                    let addr = AddressHash::from_destination_hash(destination);
+                    let is_delivery = router
+                        .inner
+                        .delivery_destinations
+                        .lock()
+                        .unwrap()
+                        .contains_key(&addr);
+
+                    if is_delivery {
+                        debug!(
+                            "Single-packet delivery received for {}: {} bytes",
+                            hex::encode(addr.as_slice()),
+                            data.len()
+                        );
+                        router
+                            .inner
+                            .pending_inbound
+                            .lock()
+                            .unwrap()
+                            .push_back(data);
+                    }
+                }
+                NodeEvent::LinkClosed { link_id, reason, .. } => {
+                    debug!("Link closed: {:?} reason: {:?}", link_id, reason);
+                }
+                NodeEvent::PathFound { destination_hash, hops, .. } => {
+                    trace!(
+                        "Path found to {} ({} hops)",
+                        destination_hash,
+                        hops
+                    );
+                }
+                _ => {
+                    // Other events (PathLost, LinkStale, etc.) — ignore for now
+                }
+            }
+        }
+        info!("LXMF event loop ended (transport event channel closed)");
     }
 
     /// Queue an outbound LXMF message for later processing.
@@ -1208,19 +1314,24 @@ impl LxmRouter {
     }
 
     async fn send_outbound_message(
-        transport: Arc<Transport>,
+        transport: Arc<LxmfTransport>,
         destination: AddressHash,
         payload: Vec<u8>,
     ) -> Result<DispatchOutcome, RnsError> {
-        if !transport.has_path(&destination).await {
-            transport.request_path(&destination, None).await;
+        let dest_hash = destination.to_destination_hash();
+
+        if !transport.has_path(&dest_hash).await {
+            let _ = transport.request_path(&dest_hash).await;
             return Ok(DispatchOutcome::AwaitingPath);
         }
 
+        // Use single-packet delivery for all messages
+        // (Resource-based delivery for large messages will be added later
+        //  when link establishment is fully integrated)
         transport
-            .send_to_destination(&destination, &payload, PacketContext::None)
-            .await?;
-        Ok(DispatchOutcome::Sent)
+            .send_single_packet(&dest_hash, &payload)
+            .await
+            .map(|_| DispatchOutcome::Sent)
     }
 
     fn clean_message_store(&self) {

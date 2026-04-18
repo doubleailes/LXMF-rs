@@ -13,6 +13,7 @@ pub enum RouterError {
     DispatchThreadPanicked,
     NoTransportAttached,
     Transport(RnsError),
+    TransportError(String),
     Io(std::io::Error),
     Serialization(String),
     Deserialization(String),
@@ -50,6 +51,7 @@ impl fmt::Display for RouterError {
                 write!(f, "No Reticulum transport attached to router")
             }
             RouterError::Transport(err) => write!(f, "Transport error: {}", err),
+            RouterError::TransportError(msg) => write!(f, "Transport error: {}", msg),
             RouterError::Io(err) => write!(f, "I/O error: {}", err),
             RouterError::Serialization(err) => write!(f, "Serialization error: {}", err),
             RouterError::Deserialization(err) => write!(f, "Deserialization error: {}", err),
