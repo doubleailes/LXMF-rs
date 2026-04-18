@@ -1,4 +1,5 @@
 pub mod compat;
+pub mod transport;
 mod message;
 pub use message::{LXMessage, ValidMethod};
 mod peer;
@@ -7,8 +8,9 @@ pub mod router;
 pub use router::{
     APP_NAME, LXMFDeliveryAnnounceHandler, LXMFPropagationAnnounceHandler, LxmRouter,
     PropagationNodeAnnounceData, RouterConfig, RouterError, STAMP_COST_EXPIRY_S,
-    SharedDeliveryAnnounceHandler, display_name_from_app_data, pn_announce_data_is_valid,
-    pn_name_from_app_data, stamp_cost_from_app_data,
+    SharedDeliveryAnnounceHandler, display_name_from_app_data, handle_delivery_announce,
+    handle_propagation_announce, pn_announce_data_is_valid, pn_name_from_app_data,
+    stamp_cost_from_app_data,
 };
 mod error;
 pub use error::LXMError;

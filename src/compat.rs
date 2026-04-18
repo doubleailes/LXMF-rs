@@ -438,107 +438,16 @@ impl fmt::Display for RnsError {
 
 impl std::error::Error for RnsError {}
 
-// ── Transport (stub) ─────────────────────────────────────────────────
+// ── AddressHash ↔ DestinationHash conversion ────────────────────────
 
-/// Stub for beetchat `reticulum::transport::Transport`.
-///
-/// Will be replaced with leviculum `ReticulumNode` integration in the next
-/// phase.  For now, only the methods actually called from the router are
-/// stubbed.
-pub struct Transport {
-    // TODO: wrap reticulum_std::ReticulumNode when transport integration lands
-}
-
-impl Transport {
-    pub fn new(_config: TransportConfig) -> Self {
-        Self {}
+impl AddressHash {
+    /// Convert to a leviculum `DestinationHash`.
+    pub fn to_destination_hash(&self) -> reticulum_core::DestinationHash {
+        reticulum_core::DestinationHash::new(self.0)
     }
 
-    pub async fn has_path(&self, _destination: &AddressHash) -> bool {
-        // TODO: implement via leviculum
-        false
-    }
-
-    pub async fn request_path(&self, _destination: &AddressHash, _tag: Option<u64>) {
-        // TODO: implement via leviculum
-    }
-
-    pub async fn send_to_destination(
-        &self,
-        _destination: &AddressHash,
-        _payload: &[u8],
-        _context: PacketContext,
-    ) -> Result<(), RnsError> {
-        // TODO: implement via leviculum
-        Err(RnsError::NotImplemented)
-    }
-
-    pub async fn recall_identity(
-        &self,
-        _destination: &AddressHash,
-        _request: bool,
-    ) -> Option<Identity> {
-        // TODO: implement via leviculum
-        None
-    }
-
-    pub async fn send_direct(&self, _iface: usize, _data: Vec<u8>) {
-        // TODO: implement via leviculum
-    }
-
-    pub async fn register_announce_handler<H: AnnounceHandler + Send + Sync + 'static>(
-        &self,
-        _handler: H,
-    ) {
-        // TODO: implement via leviculum
-    }
-
-    pub fn iface_manager(&self) -> std::sync::Arc<tokio::sync::Mutex<IfaceManagerStub>> {
-        std::sync::Arc::new(tokio::sync::Mutex::new(IfaceManagerStub))
+    /// Create from a leviculum `DestinationHash`.
+    pub fn from_destination_hash(dh: reticulum_core::DestinationHash) -> Self {
+        Self(dh.into_bytes())
     }
 }
-
-/// Stub transport config.
-pub struct TransportConfig;
-
-impl Default for TransportConfig {
-    fn default() -> Self {
-        Self
-    }
-}
-
-/// Stub iface manager.
-pub struct IfaceManagerStub;
-
-impl IfaceManagerStub {
-    pub fn spawn<I, F>(&self, _iface: I, _spawner: F) -> usize
-    where
-        F: FnOnce(I) -> usize,
-    {
-        0
-    }
-}
-
-// ── AnnounceHandler trait (stub) ─────────────────────────────────────
-
-/// Stub trait matching beetchat's `AnnounceHandler`.
-pub trait AnnounceHandler: Send + Sync {
-    fn handle_announce(
-        &self,
-        destination: std::sync::Arc<tokio::sync::Mutex<SingleOutputDestination>>,
-        app_data: Vec<u8>,
-    );
-
-    fn aspect_filter(&self) -> Option<&str> {
-        None
-    }
-
-    fn receive_path_responses(&self) -> bool {
-        false
-    }
-}
-
-// ── PacketDataBuffer ─────────────────────────────────────────────────
-
-/// Alias matching beetchat's `PacketDataBuffer`.
-pub type PacketDataBuffer = Vec<u8>;
