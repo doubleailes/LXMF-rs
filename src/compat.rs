@@ -116,8 +116,10 @@ impl AddressHash {
     pub fn to_hex_string(&self) -> String {
         let mut s = String::with_capacity(ADDRESS_HASH_SIZE * 2);
         for byte in &self.0 {
+            // fmt::Write for String is infallible, but we avoid unwrap()
+            // by using the `_` discard pattern instead.
             use fmt::Write;
-            write!(&mut s, "{:02x}", byte).unwrap();
+            let _ = write!(&mut s, "{:02x}", byte);
         }
         s
     }
@@ -184,30 +186,19 @@ pub struct PrivateIdentity {
 }
 
 impl PrivateIdentity {
-    pub fn from_leviculum(inner: reticulum_core::Identity) -> Self {
-        assert!(
-            inner.has_private_keys(),
-            "PrivateIdentity requires private keys"
-        );
-        Self { inner }
+    pub fn from_leviculum(inner: reticulum_core::Identity) -> Result<Self, RnsError> {
+        if !inner.has_private_keys() {
+            return Err(RnsError::CryptoError);
+        }
+        Ok(Self { inner })
     }
 
     /// Deterministic identity derived from a name (matches beetchat `new_from_name`).
     pub fn new_from_name(name: &str) -> Self {
-        // beetchat derives keys deterministically: SHA-256(name) → seed → keys
+        // beetchat derives keys deterministically: SHA-256(name) → seed → keys.
+        // It uses a deterministic RNG seeded from the hash. We replicate exactly
+        // by seeding a ChaCha12Rng from the hash and using Identity::generate.
         let seed = reticulum_core::crypto::full_hash(name.as_bytes());
-        // Use the hash as the private key material (32 bytes X25519 + 32 bytes Ed25519).
-        // beetchat uses `deterministic::deterministic_rng(name)` which produces the same
-        // sequence.  We replicate by using the hash as both key seeds.
-        let mut key_bytes = [0u8; 64];
-        key_bytes[..32].copy_from_slice(&seed);
-        // For the Ed25519 half, hash again to get a different 32 bytes
-        let ed_seed = reticulum_core::crypto::full_hash(&seed);
-        key_bytes[32..].copy_from_slice(&ed_seed);
-
-        // Actually, beetchat uses a deterministic RNG seeded from name bytes.
-        // Let's replicate exactly: seed a ChaCha12Rng from the hash and use
-        // Identity::generate.
         use rand_chacha::ChaCha12Rng;
         use rand_core::SeedableRng;
         let mut rng = ChaCha12Rng::from_seed(seed);
@@ -223,23 +214,20 @@ impl PrivateIdentity {
     }
 
     /// Get the public-only view.
-    pub fn as_identity(&self) -> Identity {
+    pub fn as_identity(&self) -> Result<Identity, RnsError> {
         // Create a public-only copy
         let pub_bytes = self.inner.public_key_bytes();
         let pub_identity = reticulum_core::Identity::from_public_key_bytes(&pub_bytes)
-            .expect("public key bytes should be valid");
-        Identity {
+            .map_err(|_| RnsError::CryptoError)?;
+        Ok(Identity {
             inner: pub_identity,
-        }
+        })
     }
 
     /// Sign `data` and return an ed25519_dalek `Signature`.
-    pub fn sign(&self, data: &[u8]) -> ed25519_dalek::Signature {
-        let sig_bytes = self
-            .inner
-            .sign(data)
-            .expect("signing should succeed with private keys");
-        ed25519_dalek::Signature::from_bytes(&sig_bytes)
+    pub fn sign(&self, data: &[u8]) -> Result<ed25519_dalek::Signature, RnsError> {
+        let sig_bytes = self.inner.sign(data).map_err(|_| RnsError::CryptoError)?;
+        Ok(ed25519_dalek::Signature::from_bytes(&sig_bytes))
     }
 
     pub fn verify(
@@ -299,7 +287,12 @@ pub struct SingleInputDestination {
 
 impl SingleInputDestination {
     pub fn new(identity: PrivateIdentity, name: DestinationName) -> Self {
-        let address_hash = compute_destination_hash(&identity.as_identity(), &name);
+        // as_identity() can only fail if the public key bytes are invalid,
+        // which should never happen for a valid PrivateIdentity.
+        let pub_identity = identity
+            .as_identity()
+            .expect("PrivateIdentity should always yield valid public keys");
+        let address_hash = compute_destination_hash(&pub_identity, &name);
         Self {
             identity,
             name,
@@ -307,13 +300,20 @@ impl SingleInputDestination {
         }
     }
 
-    /// Stub for announce — will be implemented when transport integration lands.
+    /// Low-level announce on a `SingleInputDestination`.
+    ///
+    /// Transport-level announcing is handled by `LxmRouter::announce()` which
+    /// delegates to the attached `LxmfTransport`. This method remains as a
+    /// standalone packet-generation stub for cases where a destination wants
+    /// to produce an announce outside of the router/transport stack.
+    ///
+    /// TODO: Wire this to `LxmfTransport::announce_destination()` or remove
+    /// in favour of the router-level announce exclusively.
     pub fn announce<R: rand_core::CryptoRngCore + Copy>(
         &mut self,
         _rng: R,
         _app_data: Option<&[u8]>,
     ) -> Result<Vec<u8>, RnsError> {
-        // TODO: Implement announce packet generation via leviculum transport
         Err(RnsError::NotImplemented)
     }
 }

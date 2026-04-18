@@ -69,6 +69,27 @@ pub const JOB_ROTATE_INTERVAL: u64 = 56 * JOB_PEERSYNC_INTERVAL;
 /// We use a conservative threshold to account for encryption overhead on links.
 pub const SINGLE_PACKET_MAX_PAYLOAD: usize = 400;
 
+/// Delivery method selected based on payload size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryMethod {
+    /// Small payload: fits in a single Reticulum packet.
+    SinglePacket,
+    /// Large payload: requires Link + Resource transfer.
+    LinkResource,
+}
+
+/// Select the delivery method based on the transport payload size.
+///
+/// Payloads up to [`SINGLE_PACKET_MAX_PAYLOAD`] bytes are sent as a single
+/// packet. Larger payloads require a Link + Resource transfer.
+pub fn select_delivery_method(transport_payload_size: usize) -> DeliveryMethod {
+    if transport_payload_size <= SINGLE_PACKET_MAX_PAYLOAD {
+        DeliveryMethod::SinglePacket
+    } else {
+        DeliveryMethod::LinkResource
+    }
+}
+
 pub const PN_META_NAME: u8 = 0x01;
 const TRANSIENT_ID_LEN: usize = 32;
 
@@ -672,7 +693,9 @@ impl LxmRouter {
     ) -> Result<AddressHash, RouterError> {
         let identity = identity.unwrap_or_else(|| self.inner.identity.clone());
         let destination = SingleOutputDestination::new(
-            identity.as_identity(),
+            identity
+                .as_identity()
+                .map_err(|e| RouterError::Transport(e))?,
             DestinationName::new(APP_NAME, DELIVERY_ASPECT),
         );
         let dest_hash = destination.desc.address_hash;
@@ -1448,22 +1471,25 @@ impl LxmRouter {
             return Ok(DispatchOutcome::AwaitingPath);
         }
 
-        if transport_payload.len() <= SINGLE_PACKET_MAX_PAYLOAD {
-            // Small message: send via single packet (opportunistic-style)
-            // transport_payload is packed[16..] (dest hash stripped)
-            transport
-                .send_single_packet(&dest_hash, &transport_payload)
-                .await
-                .map(|_| DispatchOutcome::Sent)
-        } else {
-            // Large message: send via Link + Resource transfer
-            // full_packed is the complete LXMF message (dest_hash + src_hash + sig + payload)
-            info!(
-                "Message too large for single packet ({} bytes), using Link+Resource for {}",
-                transport_payload.len(),
-                destination
-            );
-            Self::deliver_via_link(transport, inner, destination, full_packed).await
+        match select_delivery_method(transport_payload.len()) {
+            DeliveryMethod::SinglePacket => {
+                // Small message: send via single packet (opportunistic-style)
+                // transport_payload is packed[16..] (dest hash stripped)
+                transport
+                    .send_single_packet(&dest_hash, &transport_payload)
+                    .await
+                    .map(|_| DispatchOutcome::Sent)
+            }
+            DeliveryMethod::LinkResource => {
+                // Large message: send via Link + Resource transfer
+                // full_packed is the complete LXMF message (dest_hash + src_hash + sig + payload)
+                info!(
+                    "Message too large for single packet ({} bytes), using Link+Resource for {}",
+                    transport_payload.len(),
+                    destination
+                );
+                Self::deliver_via_link(transport, inner, destination, full_packed).await
+            }
         }
     }
 
@@ -2237,5 +2263,47 @@ impl From<MessageError> for OutboundPreparationError {
 impl From<StampError> for OutboundPreparationError {
     fn from(err: StampError) -> Self {
         OutboundPreparationError::Stamp(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_packet_at_threshold() {
+        assert_eq!(
+            select_delivery_method(SINGLE_PACKET_MAX_PAYLOAD),
+            DeliveryMethod::SinglePacket,
+        );
+    }
+
+    #[test]
+    fn link_resource_above_threshold() {
+        assert_eq!(
+            select_delivery_method(SINGLE_PACKET_MAX_PAYLOAD + 1),
+            DeliveryMethod::LinkResource,
+        );
+    }
+
+    #[test]
+    fn single_packet_for_empty_payload() {
+        assert_eq!(select_delivery_method(0), DeliveryMethod::SinglePacket,);
+    }
+
+    #[test]
+    fn single_packet_for_small_payload() {
+        assert_eq!(select_delivery_method(100), DeliveryMethod::SinglePacket,);
+    }
+
+    #[test]
+    fn link_resource_for_large_payload() {
+        assert_eq!(select_delivery_method(10_000), DeliveryMethod::LinkResource,);
+    }
+
+    #[test]
+    fn threshold_constant_is_400() {
+        // Ensure the threshold matches the documented value
+        assert_eq!(SINGLE_PACKET_MAX_PAYLOAD, 400);
     }
 }

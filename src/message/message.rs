@@ -228,7 +228,10 @@ impl LXMessage {
 
         hashed_part.extend_from_slice(message_hash.as_slice());
 
-        let signature = source.identity.sign(&hashed_part);
+        let signature = source
+            .identity
+            .sign(&hashed_part)
+            .map_err(|e| MessageError::SigningError(e.to_string()))?;
         self.signature = Some(signature.to_bytes());
         self.signature_validated = true;
         self.unverified_reason = None;
@@ -774,7 +777,7 @@ mod tests {
         let source_destination =
             SingleInputDestination::new(sender, DestinationName::new("lxmf", "delivery"));
         let destination = SingleOutputDestination::new(
-            receiver.as_identity().clone(),
+            receiver.as_identity().expect("valid public keys"),
             DestinationName::new("lxmf", "delivery"),
         );
 
