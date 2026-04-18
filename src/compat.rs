@@ -334,21 +334,33 @@ impl SingleOutputDestination {
     }
 }
 
-/// Compute the destination hash the same way as beetchat:
-/// `truncated_hash(full_hash(name_hash + identity_hash))` where
-/// `name_hash = full_hash(app_name.aspects)` and
-/// `identity_hash` is the 16-byte identity hash.
+/// Compute the destination hash the same way as leviculum/RNS:
+/// `truncated_hash(name_hash_10 + identity_hash_16)` where
+/// `name_hash_10 = sha256(app_name.aspects)[..10]` (NAME_HASHBYTES = 10)
+/// `identity_hash_16` is the 16-byte identity hash.
 fn compute_destination_hash(identity: &Identity, name: &DestinationName) -> AddressHash {
-    let full_name = name.full_name();
-    let name_hash = reticulum_core::crypto::full_hash(full_name.as_bytes());
-    let identity_hash = identity.inner().hash();
+    use reticulum_core::Destination;
 
-    let mut material = Vec::with_capacity(32 + 16);
-    material.extend_from_slice(&name_hash);
-    material.extend_from_slice(identity_hash);
-    let full = reticulum_core::crypto::full_hash(&material);
-    let mut truncated = [0u8; ADDRESS_HASH_SIZE];
-    truncated.copy_from_slice(&full[..ADDRESS_HASH_SIZE]);
+    let full_name = name.full_name();
+    let full_name_parts: Vec<&str> = full_name.splitn(2, '.').collect();
+    let (app_name, aspects_str) = if full_name_parts.len() == 2 {
+        (full_name_parts[0], full_name_parts[1])
+    } else {
+        (full_name_parts[0], "")
+    };
+
+    // Parse aspects from "delivery" or "propagation" etc.
+    let aspects: Vec<&str> = if aspects_str.is_empty() {
+        vec![]
+    } else {
+        aspects_str.split('.').collect()
+    };
+
+    let name_hash = Destination::compute_name_hash(app_name, &aspects);
+    let identity_hash = identity.inner().hash();
+    let dest_hash = Destination::compute_destination_hash(&name_hash, identity_hash);
+
+    let truncated: [u8; ADDRESS_HASH_SIZE] = dest_hash.into();
     AddressHash::new(truncated)
 }
 
