@@ -10,8 +10,6 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    thread,
-    time::Duration,
 };
 
 use log::{debug, error, info, trace, warn};
@@ -123,11 +121,10 @@ impl LXMFDeliveryAnnounceHandler {
                 "Announce received for {}, triggering outbound processing",
                 hex::encode(destination_hash.as_slice())
             );
-            let router = self.lxmrouter.clone();
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(100));
-                router.process_outbound();
-            });
+            // Signal the router's existing job loop instead of spawning a thread.
+            // process_outbound() runs every JOB_OUTBOUND_INTERVAL ticks, but we
+            // can trigger it directly since it is safe to call from any context.
+            self.lxmrouter.process_outbound();
         }
     }
 
@@ -183,11 +180,8 @@ pub fn handle_delivery_announce(
             "Delivery announce for {}, triggering outbound processing",
             hex::encode(destination_hash.as_slice())
         );
-        let router = router.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            router.process_outbound();
-        });
+        // Call process_outbound directly instead of spawning a thread per announce.
+        router.process_outbound();
     }
 }
 

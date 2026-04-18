@@ -1,11 +1,14 @@
+use std::sync::Arc;
+
 use LXMF_rs::compat::{
-    AddressHash, DestinationName, PrivateIdentity, SingleInputDestination, SingleOutputDestination,
+    AddressHash, DestinationName, Identity, PrivateIdentity, SingleInputDestination,
+    SingleOutputDestination,
 };
+use LXMF_rs::transport::LxmfTransport;
 use LXMF_rs::{LXMessage, LxmRouter, RouterConfig, ValidMethod};
 use rand_core::OsRng;
 use std::{env, net::SocketAddr};
 
-use reticulum_core::node::NodeEvent;
 use reticulum_core::{Destination, DestinationType, Direction};
 use reticulum_std::driver::ReticulumNodeBuilder;
 
@@ -71,12 +74,7 @@ async fn main() {
         .build_sync()
         .expect("failed to build ReticulumNode");
 
-    // Take event receiver BEFORE start
-    let mut event_rx = node
-        .take_event_receiver()
-        .expect("event receiver already taken");
-
-    // Start the node
+    // Start the node (leave event receiver for the transport to consume later)
     node.start().await.expect("failed to start node");
     log::info!("Connected to testnet at {}", TESTNET_ADDR);
 
@@ -111,27 +109,14 @@ async fn main() {
         .await
         .expect("failed to request path");
 
-    // Wait for path (with timeout)
+    // Wait for path (poll-based so we don't consume the event receiver)
     let path_timeout = tokio::time::Duration::from_secs(30);
     let path_found = tokio::time::timeout(path_timeout, async {
         loop {
             if node.has_path(&target_hash) {
                 return true;
             }
-            match event_rx.recv().await {
-                Some(NodeEvent::PathFound {
-                    destination_hash,
-                    hops,
-                    ..
-                }) => {
-                    if destination_hash == target_hash {
-                        log::info!("Path found to {} ({} hops)", destination_hash, hops);
-                        return true;
-                    }
-                }
-                Some(_) => continue,
-                None => return false,
-            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
         }
     })
     .await;
@@ -146,11 +131,19 @@ async fn main() {
         }
     }
 
-    // Create LXMF message
-    let demo_rng = &mut OsRng;
-    let receiver_identity = PrivateIdentity::new_from_rand(demo_rng);
+    // Build the destination using the target identity from the network (fix: use CLI dest hash)
+    let receiver_pub_identity = match node.get_identity(&target_hash) {
+        Some(id) => Identity::from_leviculum(id),
+        None => {
+            log::error!(
+                "Could not retrieve identity for {} from network — path may not be resolved",
+                target_hash
+            );
+            return;
+        }
+    };
     let destination = SingleOutputDestination::new(
-        receiver_identity.as_identity(),
+        receiver_pub_identity,
         DestinationName::new(APP_NAME, DELIVERY_ASPECT),
     );
     let source_destination = SingleInputDestination::new(
@@ -168,7 +161,8 @@ async fn main() {
         true,
     );
 
-    // Set up the router with the transport
+    // Set up the router and attach transport (fix: wire transport to router)
+    let transport = Arc::new(LxmfTransport::from_node(node));
     let mut router_config = RouterConfig::new("/tmp/lxmf");
     router_config.identity = Some(private_identity.clone());
     let router = LxmRouter::new(router_config).expect("failed to create router");
@@ -180,24 +174,23 @@ async fn main() {
         return;
     }
 
+    if let Err(err) = router.attach_transport(transport.clone()).await {
+        log::error!("Could not attach transport to router: {}", err);
+        return;
+    }
+
     router.enqueue_outbound(message);
     log::info!(
         "Queued LXMF message targeting {}",
         hex::encode(destination_hash.as_slice())
     );
 
-    // If we have a path, try sending via single packet
-    if node.has_path(&target_hash) {
-        log::info!("Attempting direct delivery...");
-        // Flush would use the transport, but for demo let's show it works
-        if let Err(err) = router.flush_outbound_blocking() {
-            log::warn!(
-                "Flush returned error (expected without full transport): {}",
-                err
-            );
-        }
+    // Flush outbound via the attached transport
+    log::info!("Attempting delivery...");
+    if let Err(err) = router.flush_outbound_blocking() {
+        log::warn!("Flush returned error: {}", err);
     }
 
     log::info!("Done. Shutting down...");
-    node.stop().await.expect("failed to stop node");
+    transport.stop().await.expect("failed to stop transport");
 }

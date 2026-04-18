@@ -64,7 +64,8 @@ async fn main() {
 
     // Generate identity
     let our_identity = Identity::generate(&mut OsRng);
-    let our_private = PrivateIdentity::from_leviculum(our_identity.clone());
+    let our_private =
+        PrivateIdentity::from_leviculum(our_identity.clone()).expect("identity has private keys");
 
     // Build node
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
