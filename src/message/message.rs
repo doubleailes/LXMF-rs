@@ -7,8 +7,8 @@ use std::{
 };
 
 use crate::compat::{
-    ADDRESS_HASH_SIZE, AddressHash, DestinationType, Hash, Identity,
-    SingleInputDestination, SingleOutputDestination,
+    ADDRESS_HASH_SIZE, AddressHash, DestinationType, Hash, Identity, SingleInputDestination,
+    SingleOutputDestination,
 };
 use crate::message::{LxPayload, MessageError};
 use indexmap::IndexMap;
@@ -766,7 +766,7 @@ pub enum UnverifiedReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::{DestinationName, PrivateIdentity};
+    use crate::compat::{DestinationName, HASH_SIZE, PrivateIdentity};
 
     fn sample_message() -> LXMessage {
         let sender = PrivateIdentity::new_from_name("sender");

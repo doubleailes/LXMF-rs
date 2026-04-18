@@ -21,7 +21,6 @@ use LXMF_rs::{LXMessage, ValidMethod};
 use rand_core::OsRng;
 
 use reticulum_core::node::NodeEvent;
-use reticulum_core::resource::ResourceStrategy;
 use reticulum_core::{Destination, DestinationType, Direction, Identity};
 use reticulum_std::driver::ReticulumNodeBuilder;
 
