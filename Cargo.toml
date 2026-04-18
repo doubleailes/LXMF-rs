@@ -5,8 +5,8 @@ edition = "2024"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-reticulum-core = { path = "../leviculum/reticulum-core" }
-reticulum-std = { path = "../leviculum/reticulum-std" }
+reticulum-core = { git = "https://codeberg.org/Lew_Palm/leviculum.git", tag = "v0.6.0" }
+reticulum-std  = { git = "https://codeberg.org/Lew_Palm/leviculum.git", tag = "v0.6.0" }
 sha2 = "0.10"
 hkdf = "0.12"
 ed25519-dalek = { version = "2.1", features = ["std"] }
