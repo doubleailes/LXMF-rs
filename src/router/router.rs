@@ -889,7 +889,7 @@ impl LxmRouter {
                 NodeEvent::ResourceCompleted {
                     link_id,
                     data,
-                    metadata,
+                    metadata: _,
                     is_sender,
                     resource_hash,
                     ..
@@ -899,7 +899,7 @@ impl LxmRouter {
                         debug!(
                             "Resource send completed on link {:?}: hash {}",
                             link_id,
-                            hex::encode(&resource_hash)
+                            hex::encode(resource_hash)
                         );
                         let sender = router
                             .inner
@@ -930,7 +930,7 @@ impl LxmRouter {
                 } => {
                     warn!(
                         "Resource failed: hash {} error {:?} sender: {}",
-                        hex::encode(&resource_hash),
+                        hex::encode(resource_hash),
                         error,
                         is_sender
                     );
@@ -1494,7 +1494,7 @@ impl LxmRouter {
                             let mut delivered =
                                 self.inner.locally_delivered_transient_ids.lock().unwrap();
                             if delivered.contains_key(&tid) {
-                                debug!("Duplicate inbound message {}, skipping", hex::encode(&tid));
+                                debug!("Duplicate inbound message {}, skipping", hex::encode(tid));
                                 continue;
                             }
                             delivered.insert(tid, now);
