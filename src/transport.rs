@@ -210,6 +210,18 @@ impl LxmfTransport {
             .map_err(|e| RnsError::Transport(format!("set_resource_strategy failed: {}", e)))
     }
 
+    // ── Link management ────────────────────────────────────────────────
+
+    /// Close a link gracefully.
+    pub async fn close_link(&self, link_id: &LinkId) -> Result<(), RnsError> {
+        self.node
+            .lock()
+            .await
+            .close_link(link_id)
+            .await
+            .map_err(|e| RnsError::Transport(format!("close_link failed: {}", e)))
+    }
+
     // ── Single-packet delivery ───────────────────────────────────────
 
     /// Send a single (fire-and-forget) packet to a destination.

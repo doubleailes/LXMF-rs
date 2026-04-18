@@ -168,20 +168,19 @@ async fn main() {
         true,
     );
 
-    if let Err(e) = message.pack() {
-        log::error!("Failed to pack message: {:?}", e);
-        node.stop().await.ok();
-        return;
-    }
-
-    let payload = match message.transport_payload() {
-        Ok(p) => p,
+    let packed = match message.pack() {
+        Ok(p) => p.to_vec(),
         Err(e) => {
-            log::error!("Failed to get transport payload: {:?}", e);
+            log::error!("Failed to pack message: {:?}", e);
             node.stop().await.ok();
             return;
         }
     };
+
+    // For Link+Resource delivery, send the FULL packed bytes (including dest_hash).
+    // Python's LXMRouter.delivery_resource_concluded() passes the raw resource data
+    // to LXMessage.unpack_from_bytes() which expects: dest_hash + src_hash + sig + payload
+    let payload = packed.clone();
 
     log::info!("Message packed: {} bytes (content: {} bytes)", payload.len(), content_size);
     log::info!("MDU is 464 bytes — this message REQUIRES Link + Resource transfer");

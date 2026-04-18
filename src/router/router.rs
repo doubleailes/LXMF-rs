@@ -28,6 +28,7 @@ use crate::compat::{
 use crate::transport::LxmfTransport;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
+use reticulum_core::LinkId;
 
 use crate::{
     LXMessage, LxmPeer, PeerMetadata, SyncStrategy,
@@ -56,10 +57,18 @@ pub const MESSAGE_EXPIRY_S: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 pub const STAMP_COST_EXPIRY_S: f64 = 45.0 * 24.0 * 60.0 * 60.0;
 
 pub const JOB_OUTBOUND_INTERVAL: u64 = 1;
+pub const JOB_INBOUND_INTERVAL: u64 = 1;
 pub const JOB_TRANSIENT_INTERVAL: u64 = 60;
 pub const JOB_STORE_INTERVAL: u64 = 120;
 pub const JOB_PEERSYNC_INTERVAL: u64 = 6;
 pub const JOB_ROTATE_INTERVAL: u64 = 56 * JOB_PEERSYNC_INTERVAL;
+
+/// Maximum payload size that fits in a single Reticulum packet.
+/// Messages larger than this must be sent via Link + Resource transfer.
+/// The Reticulum MDU is 464 bytes, but after LXMF overhead (dest_hash stripped
+/// for opportunistic), the effective limit for the transport payload is ~464.
+/// We use a conservative threshold to account for encryption overhead on links.
+pub const SINGLE_PACKET_MAX_PAYLOAD: usize = 400;
 
 pub const PN_META_NAME: u8 = 0x01;
 const TRANSIENT_ID_LEN: usize = 32;
@@ -509,6 +518,33 @@ pub struct PropagationEntry {
 
 type DeliveryCallback = Arc<dyn Fn(&LXMessage) + Send + Sync + 'static>;
 
+/// Event dispatcher for coordinating outbound Link+Resource delivery.
+///
+/// When the router initiates a link, it registers a oneshot sender here.
+/// The event loop fires the sender when the corresponding event arrives.
+struct EventDispatcher {
+    link_established: HashMap<LinkId, tokio::sync::oneshot::Sender<()>>,
+    resource_completed: HashMap<[u8; 32], tokio::sync::oneshot::Sender<bool>>,
+}
+
+impl EventDispatcher {
+    fn new() -> Self {
+        Self {
+            link_established: HashMap::new(),
+            resource_completed: HashMap::new(),
+        }
+    }
+}
+
+impl fmt::Debug for EventDispatcher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EventDispatcher")
+            .field("link_established_waiters", &self.link_established.len())
+            .field("resource_completed_waiters", &self.resource_completed.len())
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct LxmRouter {
     pub(crate) inner: Arc<RouterInner>,
@@ -574,6 +610,7 @@ pub(crate) struct RouterInner {
 
     throttled_peers: Mutex<HashMap<AddressHash, Timestamp>>,
     delivery_callback: Mutex<Option<DeliveryCallback>>,
+    event_dispatcher: Mutex<EventDispatcher>,
     exit_handler_running: Mutex<bool>,
 }
 
@@ -832,27 +869,78 @@ impl LxmRouter {
                         "Link established: {:?} (initiator: {})",
                         link_id, is_initiator
                     );
+                    // Notify any waiting outbound delivery
+                    let sender = router
+                        .inner
+                        .event_dispatcher
+                        .lock()
+                        .unwrap()
+                        .link_established
+                        .remove(&link_id);
+                    if let Some(tx) = sender {
+                        let _ = tx.send(());
+                    }
                 }
                 NodeEvent::ResourceCompleted {
                     link_id,
                     data,
                     metadata,
                     is_sender,
+                    resource_hash,
                     ..
                 } => {
-                    if !is_sender && !data.is_empty() {
+                    if is_sender {
+                        // Notify any waiting outbound delivery that resource was sent
                         debug!(
-                            "Resource completed on link {:?}: {} bytes",
+                            "Resource send completed on link {:?}: hash {}",
+                            link_id,
+                            hex::encode(&resource_hash)
+                        );
+                        let sender = router
+                            .inner
+                            .event_dispatcher
+                            .lock()
+                            .unwrap()
+                            .resource_completed
+                            .remove(&resource_hash);
+                        if let Some(tx) = sender {
+                            let _ = tx.send(true);
+                        }
+                    } else if !data.is_empty() {
+                        debug!(
+                            "Resource received on link {:?}: {} bytes",
                             link_id,
                             data.len()
                         );
-                        // Queue for inbound processing
+                        // Resource data IS the full packed LXMF message
+                        // (dest_hash + src_hash + signature + payload)
                         router
                             .inner
                             .pending_inbound
                             .lock()
                             .unwrap()
                             .push_back(data);
+                    }
+                }
+                NodeEvent::ResourceFailed {
+                    resource_hash,
+                    error,
+                    is_sender,
+                    ..
+                } => {
+                    warn!("Resource failed: hash {} error {:?} sender: {}",
+                        hex::encode(&resource_hash), error, is_sender);
+                    if is_sender {
+                        let sender = router
+                            .inner
+                            .event_dispatcher
+                            .lock()
+                            .unwrap()
+                            .resource_completed
+                            .remove(&resource_hash);
+                        if let Some(tx) = sender {
+                            let _ = tx.send(false);
+                        }
                     }
                 }
                 NodeEvent::PacketReceived {
@@ -874,12 +962,21 @@ impl LxmRouter {
                             hex::encode(addr.as_slice()),
                             data.len()
                         );
+                        // For single-packet (opportunistic) delivery, the data
+                        // is packed[16..] (destination hash was in the packet
+                        // header). We need to prepend the destination hash to
+                        // form valid LXMF bytes for unpack_from_bytes().
+                        let mut lxmf_data = Vec::with_capacity(
+                            ADDRESS_HASH_SIZE + data.len(),
+                        );
+                        lxmf_data.extend_from_slice(addr.as_slice());
+                        lxmf_data.extend_from_slice(&data);
                         router
                             .inner
                             .pending_inbound
                             .lock()
                             .unwrap()
-                            .push_back(data);
+                            .push_back(lxmf_data);
                     }
                 }
                 NodeEvent::LinkClosed { link_id, reason, .. } => {
@@ -1164,6 +1261,10 @@ impl LxmRouter {
             self.process_outbound();
         }
 
+        if tick.is_multiple_of(JOB_INBOUND_INTERVAL) {
+            self.process_inbound();
+        }
+
         Ok(())
     }
 
@@ -1209,7 +1310,26 @@ impl LxmRouter {
                     .push_back(message);
                 continue;
             }
-            let payload = match message.transport_payload() {
+
+            // Get full packed bytes (with dest_hash) for Resource delivery
+            let full_packed = match message.pack() {
+                Ok(bytes) => bytes.to_vec(),
+                Err(err) => {
+                    warn!(
+                        "Failed to pack LXMF message for {:?}: {}",
+                        destination, err
+                    );
+                    self.inner
+                        .failed_outbound
+                        .lock()
+                        .unwrap()
+                        .push_back(message);
+                    continue;
+                }
+            };
+
+            // Get transport payload (dest_hash stripped) for single-packet delivery
+            let transport_payload = match message.transport_payload() {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     warn!(
@@ -1227,8 +1347,10 @@ impl LxmRouter {
 
             match runtime.block_on(Self::send_outbound_message(
                 transport.clone(),
+                Arc::clone(&self.inner),
                 destination,
-                payload,
+                transport_payload,
+                full_packed,
             )) {
                 Ok(DispatchOutcome::Sent) => {
                     trace!(
@@ -1315,8 +1437,10 @@ impl LxmRouter {
 
     async fn send_outbound_message(
         transport: Arc<LxmfTransport>,
+        inner: Arc<RouterInner>,
         destination: AddressHash,
-        payload: Vec<u8>,
+        transport_payload: Vec<u8>,
+        full_packed: Vec<u8>,
     ) -> Result<DispatchOutcome, RnsError> {
         let dest_hash = destination.to_destination_hash();
 
@@ -1325,13 +1449,190 @@ impl LxmRouter {
             return Ok(DispatchOutcome::AwaitingPath);
         }
 
-        // Use single-packet delivery for all messages
-        // (Resource-based delivery for large messages will be added later
-        //  when link establishment is fully integrated)
-        transport
-            .send_single_packet(&dest_hash, &payload)
+        if transport_payload.len() <= SINGLE_PACKET_MAX_PAYLOAD {
+            // Small message: send via single packet (opportunistic-style)
+            // transport_payload is packed[16..] (dest hash stripped)
+            transport
+                .send_single_packet(&dest_hash, &transport_payload)
+                .await
+                .map(|_| DispatchOutcome::Sent)
+        } else {
+            // Large message: send via Link + Resource transfer
+            // full_packed is the complete LXMF message (dest_hash + src_hash + sig + payload)
+            info!(
+                "Message too large for single packet ({} bytes), using Link+Resource for {}",
+                transport_payload.len(),
+                destination
+            );
+            Self::deliver_via_link(transport, inner, destination, full_packed).await
+        }
+    }
+
+    /// Process pending inbound LXMF messages.
+    ///
+    /// Drains the `pending_inbound` queue, unpacks each message from raw bytes,
+    /// checks for duplicates, and invokes the delivery callback.
+    ///
+    /// References Python LXMF/LXMRouter.py lxmf_delivery()
+    fn process_inbound(&self) {
+        let mut pending = self.inner.pending_inbound.lock().unwrap();
+        if pending.is_empty() {
+            return;
+        }
+        let items: Vec<Vec<u8>> = pending.drain(..).collect();
+        drop(pending);
+
+        for lxmf_data in items {
+            match LXMessage::unpack_from_bytes(&lxmf_data) {
+                Ok(message) => {
+                    // Check for duplicate delivery via transient ID
+                    if let Some(msg_hash) = message.message_hash() {
+                        let hash_bytes = msg_hash.as_slice();
+                        if hash_bytes.len() >= TRANSIENT_ID_LEN {
+                            let mut tid = [0u8; TRANSIENT_ID_LEN];
+                            tid.copy_from_slice(&hash_bytes[..TRANSIENT_ID_LEN]);
+                            let now = unix_time_f64();
+                            let mut delivered = self
+                                .inner
+                                .locally_delivered_transient_ids
+                                .lock()
+                                .unwrap();
+                            if delivered.contains_key(&tid) {
+                                debug!(
+                                    "Duplicate inbound message {}, skipping",
+                                    hex::encode(&tid)
+                                );
+                                continue;
+                            }
+                            delivered.insert(tid, now);
+                        }
+                    }
+
+                    let title = message
+                        .title_as_string()
+                        .unwrap_or_else(|_| "<binary>".to_string());
+                    info!(
+                        "Inbound LXMF message from {}: \"{}\" ({} bytes)",
+                        hex::encode(message.source_hash().as_slice()),
+                        title,
+                        lxmf_data.len()
+                    );
+
+                    // Invoke delivery callback
+                    let cb = self.inner.delivery_callback.lock().unwrap().clone();
+                    if let Some(callback) = cb {
+                        callback(&message);
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to unpack inbound LXMF message ({} bytes): {}",
+                        lxmf_data.len(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    /// Deliver a message via Link + Resource transfer (for large messages).
+    ///
+    /// This establishes a link to the destination, waits for it to be
+    /// confirmed, sends the full packed LXMF message as a Resource, and
+    /// waits for completion.
+    ///
+    /// References Python LXMF/LXMRouter.py direct_delivery()
+    /// Deliver a message via Link + Resource transfer (for large messages).
+    ///
+    /// This establishes a link to the destination, waits for it to be
+    /// confirmed, sends the full packed LXMF message as a Resource, and
+    /// waits for completion.
+    ///
+    /// References Python LXMF/LXMRouter.py direct_delivery()
+    async fn deliver_via_link(
+        transport: Arc<LxmfTransport>,
+        inner: Arc<RouterInner>,
+        destination: AddressHash,
+        packed_message: Vec<u8>,
+    ) -> Result<DispatchOutcome, RnsError> {
+        let dest_hash = destination.to_destination_hash();
+
+        // Get destination's signing key (Ed25519 verifying key = last 32 bytes)
+        let target_identity = transport
+            .get_identity(&dest_hash)
             .await
-            .map(|_| DispatchOutcome::Sent)
+            .ok_or_else(|| RnsError::Transport("target identity not known".into()))?;
+        let pub_bytes = target_identity.public_key_bytes();
+        let mut signing_key = [0u8; 32];
+        signing_key.copy_from_slice(&pub_bytes[32..64]);
+
+        // Establish link
+        let link_handle = transport.connect(&dest_hash, &signing_key).await?;
+        let link_id = *link_handle.link_id();
+        debug!("Link request sent to {} (link_id: {:?})", destination, link_id);
+
+        // Register waiter for LinkEstablished
+        let (link_tx, link_rx) = tokio::sync::oneshot::channel();
+        {
+            inner.event_dispatcher.lock().unwrap().link_established.insert(link_id, link_tx);
+        }
+
+        // Wait for link establishment (15s timeout)
+        match tokio::time::timeout(Duration::from_secs(15), link_rx).await {
+            Ok(Ok(())) => {
+                debug!("Link established to {} (link_id: {:?})", destination, link_id);
+            }
+            Ok(Err(_)) => {
+                return Err(RnsError::Transport("link establishment waiter dropped".into()));
+            }
+            Err(_) => {
+                inner.event_dispatcher.lock().unwrap().link_established.remove(&link_id);
+                return Err(RnsError::Transport("link establishment timed out".into()));
+            }
+        }
+
+        // Send packed message as Resource (full LXMF bytes including dest_hash)
+        debug!(
+            "Sending {} bytes via Resource on link {:?}",
+            packed_message.len(),
+            link_id
+        );
+        let resource_hash = transport
+            .send_resource(&link_id, &packed_message, None, true)
+            .await?;
+
+        // Register waiter for ResourceCompleted
+        let (res_tx, res_rx) = tokio::sync::oneshot::channel();
+        {
+            inner.event_dispatcher.lock().unwrap().resource_completed.insert(resource_hash, res_tx);
+        }
+
+        // Wait for resource completion (30s timeout)
+        let success = match tokio::time::timeout(Duration::from_secs(30), res_rx).await {
+            Ok(Ok(success)) => success,
+            Ok(Err(_)) => {
+                return Err(RnsError::Transport("resource waiter dropped".into()));
+            }
+            Err(_) => {
+                inner.event_dispatcher.lock().unwrap().resource_completed.remove(&resource_hash);
+                return Err(RnsError::Transport("resource transfer timed out".into()));
+            }
+        };
+
+        if !success {
+            return Err(RnsError::Transport("resource transfer failed".into()));
+        }
+
+        info!(
+            "LXMF message ({} bytes) delivered via Link+Resource to {}",
+            packed_message.len(),
+            destination
+        );
+
+        // Close link gracefully
+        let _ = transport.close_link(&link_id).await;
+
+        Ok(DispatchOutcome::Sent)
     }
 
     fn clean_message_store(&self) {
@@ -1775,6 +2076,7 @@ impl RouterInner {
 
             throttled_peers: Mutex::new(HashMap::new()),
             delivery_callback: Mutex::new(None),
+            event_dispatcher: Mutex::new(EventDispatcher::new()),
             exit_handler_running: Mutex::new(false),
         })
     }
