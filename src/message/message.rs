@@ -7,8 +7,8 @@ use std::{
 };
 
 use crate::compat::{
-    AddressHash, DestinationType, Hash, Identity, SingleInputDestination,
-    SingleOutputDestination, ADDRESS_HASH_SIZE, HASH_SIZE,
+    ADDRESS_HASH_SIZE, AddressHash, DestinationType, HASH_SIZE, Hash, Identity,
+    SingleInputDestination, SingleOutputDestination,
 };
 use crate::message::{LxPayload, MessageError};
 use indexmap::IndexMap;

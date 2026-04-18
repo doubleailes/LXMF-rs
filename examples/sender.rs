@@ -1,13 +1,12 @@
 use LXMF_rs::compat::{
-    AddressHash, DestinationName, PrivateIdentity, SingleInputDestination,
-    SingleOutputDestination,
+    AddressHash, DestinationName, PrivateIdentity, SingleInputDestination, SingleOutputDestination,
 };
 use LXMF_rs::{LXMessage, LxmRouter, RouterConfig, ValidMethod};
 use rand_core::OsRng;
 use std::{env, net::SocketAddr};
 
-use reticulum_core::{Destination, DestinationType, Direction};
 use reticulum_core::node::NodeEvent;
+use reticulum_core::{Destination, DestinationType, Direction};
 use reticulum_std::driver::ReticulumNodeBuilder;
 
 const APP_NAME: &str = "lxmf";
@@ -73,7 +72,9 @@ async fn main() {
         .expect("failed to build ReticulumNode");
 
     // Take event receiver BEFORE start
-    let mut event_rx = node.take_event_receiver().expect("event receiver already taken");
+    let mut event_rx = node
+        .take_event_receiver()
+        .expect("event receiver already taken");
 
     // Start the node
     node.start().await.expect("failed to start node");
@@ -118,13 +119,13 @@ async fn main() {
                 return true;
             }
             match event_rx.recv().await {
-                Some(NodeEvent::PathFound { destination_hash, hops, .. }) => {
+                Some(NodeEvent::PathFound {
+                    destination_hash,
+                    hops,
+                    ..
+                }) => {
                     if destination_hash == target_hash {
-                        log::info!(
-                            "Path found to {} ({} hops)",
-                            destination_hash,
-                            hops
-                        );
+                        log::info!("Path found to {} ({} hops)", destination_hash, hops);
                         return true;
                     }
                 }
@@ -172,7 +173,9 @@ async fn main() {
     router_config.identity = Some(private_identity.clone());
     let router = LxmRouter::new(router_config).expect("failed to create router");
 
-    if let Err(err) = router.register_delivery_identity(None, Some("LXMF-rs Sender".to_string()), None) {
+    if let Err(err) =
+        router.register_delivery_identity(None, Some("LXMF-rs Sender".to_string()), None)
+    {
         log::error!("Could not register delivery identity: {}", err);
         return;
     }
@@ -188,7 +191,10 @@ async fn main() {
         log::info!("Attempting direct delivery...");
         // Flush would use the transport, but for demo let's show it works
         if let Err(err) = router.flush_outbound_blocking() {
-            log::warn!("Flush returned error (expected without full transport): {}", err);
+            log::warn!(
+                "Flush returned error (expected without full transport): {}",
+                err
+            );
         }
     }
 

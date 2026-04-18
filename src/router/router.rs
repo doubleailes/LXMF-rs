@@ -19,16 +19,16 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use log::{debug, error, info, trace, warn};
-use rand_core::OsRng;
 use crate::compat::{
-    AddressHash, DestinationName, PrivateIdentity, RnsError,
-    SingleOutputDestination, ADDRESS_HASH_SIZE,
+    ADDRESS_HASH_SIZE, AddressHash, DestinationName, PrivateIdentity, RnsError,
+    SingleOutputDestination,
 };
 use crate::transport::LxmfTransport;
+use log::{debug, error, info, trace, warn};
+use rand_core::OsRng;
+use reticulum_core::LinkId;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
-use reticulum_core::LinkId;
 
 use crate::{
     LXMessage, LxmPeer, PeerMetadata, SyncStrategy,
@@ -41,8 +41,7 @@ use crate::{
 
 use super::error::RouterError;
 use super::handlers::{
-    PropagationNodeAnnounceData,
-    handle_delivery_announce, handle_propagation_announce,
+    PropagationNodeAnnounceData, handle_delivery_announce, handle_propagation_announce,
 };
 
 pub const APP_NAME: &str = "lxmf";
@@ -814,17 +813,14 @@ impl LxmRouter {
         use reticulum_core::node::NodeEvent;
 
         // Pre-compute name hashes for aspect matching
-        let delivery_name_hash =
-            Destination::compute_name_hash(APP_NAME, &[DELIVERY_ASPECT]);
-        let propagation_name_hash =
-            Destination::compute_name_hash(APP_NAME, &[PROPAGATION_ASPECT]);
+        let delivery_name_hash = Destination::compute_name_hash(APP_NAME, &[DELIVERY_ASPECT]);
+        let propagation_name_hash = Destination::compute_name_hash(APP_NAME, &[PROPAGATION_ASPECT]);
 
         while let Some(event) = event_rx.recv().await {
             match event {
                 NodeEvent::AnnounceReceived { announce, .. } => {
-                    let dest_hash = AddressHash::from_destination_hash(
-                        *announce.destination_hash(),
-                    );
+                    let dest_hash =
+                        AddressHash::from_destination_hash(*announce.destination_hash());
                     let app_data = announce.app_data();
                     let name_hash = announce.name_hash();
 
@@ -834,7 +830,11 @@ impl LxmRouter {
                         handle_propagation_announce(router, dest_hash, app_data, false);
                     }
                 }
-                NodeEvent::LinkRequest { link_id, destination_hash, .. } => {
+                NodeEvent::LinkRequest {
+                    link_id,
+                    destination_hash,
+                    ..
+                } => {
                     // Accept incoming links for delivery/propagation destinations
                     let addr = AddressHash::from_destination_hash(destination_hash);
                     let is_delivery = router
@@ -852,10 +852,12 @@ impl LxmRouter {
                                 Ok(_handle) => {
                                     debug!("Accepted incoming link {:?}", link_id);
                                     // Set resource strategy to accept all on this link
-                                    let _ = transport.set_resource_strategy(
-                                        &link_id,
-                                        reticulum_core::resource::ResourceStrategy::AcceptAll,
-                                    ).await;
+                                    let _ = transport
+                                        .set_resource_strategy(
+                                            &link_id,
+                                            reticulum_core::resource::ResourceStrategy::AcceptAll,
+                                        )
+                                        .await;
                                 }
                                 Err(e) => {
                                     warn!("Failed to accept link {:?}: {}", link_id, e);
@@ -864,7 +866,10 @@ impl LxmRouter {
                         }
                     }
                 }
-                NodeEvent::LinkEstablished { link_id, is_initiator } => {
+                NodeEvent::LinkEstablished {
+                    link_id,
+                    is_initiator,
+                } => {
                     debug!(
                         "Link established: {:?} (initiator: {})",
                         link_id, is_initiator
@@ -914,12 +919,7 @@ impl LxmRouter {
                         );
                         // Resource data IS the full packed LXMF message
                         // (dest_hash + src_hash + signature + payload)
-                        router
-                            .inner
-                            .pending_inbound
-                            .lock()
-                            .unwrap()
-                            .push_back(data);
+                        router.inner.pending_inbound.lock().unwrap().push_back(data);
                     }
                 }
                 NodeEvent::ResourceFailed {
@@ -928,8 +928,12 @@ impl LxmRouter {
                     is_sender,
                     ..
                 } => {
-                    warn!("Resource failed: hash {} error {:?} sender: {}",
-                        hex::encode(&resource_hash), error, is_sender);
+                    warn!(
+                        "Resource failed: hash {} error {:?} sender: {}",
+                        hex::encode(&resource_hash),
+                        error,
+                        is_sender
+                    );
                     if is_sender {
                         let sender = router
                             .inner
@@ -944,9 +948,7 @@ impl LxmRouter {
                     }
                 }
                 NodeEvent::PacketReceived {
-                    destination,
-                    data,
-                    ..
+                    destination, data, ..
                 } => {
                     let addr = AddressHash::from_destination_hash(destination);
                     let is_delivery = router
@@ -966,9 +968,7 @@ impl LxmRouter {
                         // is packed[16..] (destination hash was in the packet
                         // header). We need to prepend the destination hash to
                         // form valid LXMF bytes for unpack_from_bytes().
-                        let mut lxmf_data = Vec::with_capacity(
-                            ADDRESS_HASH_SIZE + data.len(),
-                        );
+                        let mut lxmf_data = Vec::with_capacity(ADDRESS_HASH_SIZE + data.len());
                         lxmf_data.extend_from_slice(addr.as_slice());
                         lxmf_data.extend_from_slice(&data);
                         router
@@ -979,15 +979,17 @@ impl LxmRouter {
                             .push_back(lxmf_data);
                     }
                 }
-                NodeEvent::LinkClosed { link_id, reason, .. } => {
+                NodeEvent::LinkClosed {
+                    link_id, reason, ..
+                } => {
                     debug!("Link closed: {:?} reason: {:?}", link_id, reason);
                 }
-                NodeEvent::PathFound { destination_hash, hops, .. } => {
-                    trace!(
-                        "Path found to {} ({} hops)",
-                        destination_hash,
-                        hops
-                    );
+                NodeEvent::PathFound {
+                    destination_hash,
+                    hops,
+                    ..
+                } => {
+                    trace!("Path found to {} ({} hops)", destination_hash, hops);
                 }
                 _ => {
                     // Other events (PathLost, LinkStale, etc.) — ignore for now
@@ -1315,10 +1317,7 @@ impl LxmRouter {
             let full_packed = match message.pack() {
                 Ok(bytes) => bytes.to_vec(),
                 Err(err) => {
-                    warn!(
-                        "Failed to pack LXMF message for {:?}: {}",
-                        destination, err
-                    );
+                    warn!("Failed to pack LXMF message for {:?}: {}", destination, err);
                     self.inner
                         .failed_outbound
                         .lock()
@@ -1492,16 +1491,10 @@ impl LxmRouter {
                             let mut tid = [0u8; TRANSIENT_ID_LEN];
                             tid.copy_from_slice(&hash_bytes[..TRANSIENT_ID_LEN]);
                             let now = unix_time_f64();
-                            let mut delivered = self
-                                .inner
-                                .locally_delivered_transient_ids
-                                .lock()
-                                .unwrap();
+                            let mut delivered =
+                                self.inner.locally_delivered_transient_ids.lock().unwrap();
                             if delivered.contains_key(&tid) {
-                                debug!(
-                                    "Duplicate inbound message {}, skipping",
-                                    hex::encode(&tid)
-                                );
+                                debug!("Duplicate inbound message {}, skipping", hex::encode(&tid));
                                 continue;
                             }
                             delivered.insert(tid, now);
@@ -1569,24 +1562,42 @@ impl LxmRouter {
         // Establish link
         let link_handle = transport.connect(&dest_hash, &signing_key).await?;
         let link_id = *link_handle.link_id();
-        debug!("Link request sent to {} (link_id: {:?})", destination, link_id);
+        debug!(
+            "Link request sent to {} (link_id: {:?})",
+            destination, link_id
+        );
 
         // Register waiter for LinkEstablished
         let (link_tx, link_rx) = tokio::sync::oneshot::channel();
         {
-            inner.event_dispatcher.lock().unwrap().link_established.insert(link_id, link_tx);
+            inner
+                .event_dispatcher
+                .lock()
+                .unwrap()
+                .link_established
+                .insert(link_id, link_tx);
         }
 
         // Wait for link establishment (15s timeout)
         match tokio::time::timeout(Duration::from_secs(15), link_rx).await {
             Ok(Ok(())) => {
-                debug!("Link established to {} (link_id: {:?})", destination, link_id);
+                debug!(
+                    "Link established to {} (link_id: {:?})",
+                    destination, link_id
+                );
             }
             Ok(Err(_)) => {
-                return Err(RnsError::Transport("link establishment waiter dropped".into()));
+                return Err(RnsError::Transport(
+                    "link establishment waiter dropped".into(),
+                ));
             }
             Err(_) => {
-                inner.event_dispatcher.lock().unwrap().link_established.remove(&link_id);
+                inner
+                    .event_dispatcher
+                    .lock()
+                    .unwrap()
+                    .link_established
+                    .remove(&link_id);
                 return Err(RnsError::Transport("link establishment timed out".into()));
             }
         }
@@ -1604,7 +1615,12 @@ impl LxmRouter {
         // Register waiter for ResourceCompleted
         let (res_tx, res_rx) = tokio::sync::oneshot::channel();
         {
-            inner.event_dispatcher.lock().unwrap().resource_completed.insert(resource_hash, res_tx);
+            inner
+                .event_dispatcher
+                .lock()
+                .unwrap()
+                .resource_completed
+                .insert(resource_hash, res_tx);
         }
 
         // Wait for resource completion (30s timeout)
@@ -1614,7 +1630,12 @@ impl LxmRouter {
                 return Err(RnsError::Transport("resource waiter dropped".into()));
             }
             Err(_) => {
-                inner.event_dispatcher.lock().unwrap().resource_completed.remove(&resource_hash);
+                inner
+                    .event_dispatcher
+                    .lock()
+                    .unwrap()
+                    .resource_completed
+                    .remove(&resource_hash);
                 return Err(RnsError::Transport("resource transfer timed out".into()));
             }
         };

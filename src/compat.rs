@@ -185,7 +185,10 @@ pub struct PrivateIdentity {
 
 impl PrivateIdentity {
     pub fn from_leviculum(inner: reticulum_core::Identity) -> Self {
-        assert!(inner.has_private_keys(), "PrivateIdentity requires private keys");
+        assert!(
+            inner.has_private_keys(),
+            "PrivateIdentity requires private keys"
+        );
         Self { inner }
     }
 
@@ -225,12 +228,17 @@ impl PrivateIdentity {
         let pub_bytes = self.inner.public_key_bytes();
         let pub_identity = reticulum_core::Identity::from_public_key_bytes(&pub_bytes)
             .expect("public key bytes should be valid");
-        Identity { inner: pub_identity }
+        Identity {
+            inner: pub_identity,
+        }
     }
 
     /// Sign `data` and return an ed25519_dalek `Signature`.
     pub fn sign(&self, data: &[u8]) -> ed25519_dalek::Signature {
-        let sig_bytes = self.inner.sign(data).expect("signing should succeed with private keys");
+        let sig_bytes = self
+            .inner
+            .sign(data)
+            .expect("signing should succeed with private keys");
         ed25519_dalek::Signature::from_bytes(&sig_bytes)
     }
 
