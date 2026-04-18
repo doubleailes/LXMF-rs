@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::compat::{
-    ADDRESS_HASH_SIZE, AddressHash, DestinationType, HASH_SIZE, Hash, Identity,
+    ADDRESS_HASH_SIZE, AddressHash, DestinationType, Hash, Identity,
     SingleInputDestination, SingleOutputDestination,
 };
 use crate::message::{LxPayload, MessageError};
