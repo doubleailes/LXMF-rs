@@ -1,11 +1,8 @@
-use digest::Digest;
 use rand_core::{CryptoRng, RngCore};
+use sha2::Digest;
 use thiserror::Error;
 
-use reticulum::{
-    crypt::hkdf,
-    hash::{HASH_SIZE, Hash},
-};
+use crate::compat::{hkdf, Hash, HASH_SIZE};
 
 const HASH_BITS: u16 = (HASH_SIZE * 8) as u16;
 const HKDF_BLOCK_SIZE: usize = 256;
@@ -280,7 +277,7 @@ mod tests {
     /// ```
     #[test]
     fn end_to_end_stamp_generation_and_validation() {
-        use reticulum::hash::AddressHash;
+        use crate::compat::AddressHash;
         use rmp::encode;
 
         // Use the same test data as message_hash_matches_python

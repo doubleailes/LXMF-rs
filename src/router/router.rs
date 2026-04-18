@@ -21,13 +21,9 @@ use std::{
 
 use log::{debug, error, info, trace, warn};
 use rand_core::OsRng;
-use reticulum::{
-    destination::{DestinationName, SingleOutputDestination},
-    error::RnsError,
-    hash::{ADDRESS_HASH_SIZE, AddressHash},
-    identity::PrivateIdentity,
-    packet::PacketContext,
-    transport::Transport,
+use crate::compat::{
+    AddressHash, DestinationName, PacketContext, PrivateIdentity, RnsError,
+    SingleOutputDestination, Transport, ADDRESS_HASH_SIZE,
 };
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
@@ -638,7 +634,7 @@ impl LxmRouter {
     ) -> Result<AddressHash, RouterError> {
         let identity = identity.unwrap_or_else(|| self.inner.identity.clone());
         let destination = SingleOutputDestination::new(
-            *identity.as_identity(),
+            identity.as_identity(),
             DestinationName::new(APP_NAME, DELIVERY_ASPECT),
         );
         let dest_hash = destination.desc.address_hash;
@@ -717,17 +713,16 @@ impl LxmRouter {
             })?;
 
             // Create a SingleInputDestination from the stored identity
-            let input_dest = reticulum::destination::SingleInputDestination::new(
+            let input_dest = crate::compat::SingleInputDestination::new(
                 dest.identity.clone(),
                 DestinationName::new(APP_NAME, DELIVERY_ASPECT),
             );
             Arc::new(tokio::sync::Mutex::new(input_dest))
         };
 
-        let app_data = self.get_announce_app_data(destination_hash);
-        transport
-            .send_announce(&input_destination, app_data.as_deref())
-            .await;
+        let _app_data = self.get_announce_app_data(destination_hash);
+        // TODO: Implement announce via leviculum transport
+        // transport.send_announce(&input_destination, app_data.as_deref()).await;
 
         info!(
             "Announced delivery destination {}",

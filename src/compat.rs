@@ -1,0 +1,544 @@
+//! Compatibility layer: beetchat API surface → leviculum types.
+//!
+//! This module provides thin wrappers that mirror the beetchat Reticulum-rs
+//! API so the rest of the LXMF crate can migrate incrementally.
+
+use std::fmt;
+
+use sha2::{Digest, Sha256};
+
+// ── Constants ────────────────────────────────────────────────────────
+
+pub const HASH_SIZE: usize = 32;
+pub const ADDRESS_HASH_SIZE: usize = 16;
+
+// ── Hash (32-byte SHA-256 wrapper) ───────────────────────────────────
+
+/// A 32-byte SHA-256 hash, API-compatible with beetchat `reticulum::hash::Hash`.
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
+pub struct Hash([u8; HASH_SIZE]);
+
+impl Hash {
+    /// Return a bare SHA-256 hasher (same as beetchat `Hash::generator()`).
+    pub fn generator() -> Sha256 {
+        Sha256::new()
+    }
+
+    /// Wrap an existing 32-byte array.
+    pub const fn new(bytes: [u8; HASH_SIZE]) -> Self {
+        Self(bytes)
+    }
+
+    /// Create an all-zero hash.
+    pub const fn new_empty() -> Self {
+        Self([0u8; HASH_SIZE])
+    }
+
+    /// Compute SHA-256 of `data` and return the result.
+    ///
+    /// **CRITICAL**: this *hashes* `data`, it does NOT copy bytes.
+    /// Matches beetchat `Hash::new_from_slice` and leviculum `full_hash`.
+    pub fn new_from_slice(data: &[u8]) -> Self {
+        Self(reticulum_core::crypto::full_hash(data))
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn as_bytes(&self) -> &[u8; HASH_SIZE] {
+        &self.0
+    }
+
+    pub fn to_bytes(&self) -> [u8; HASH_SIZE] {
+        self.0
+    }
+}
+
+impl fmt::Display for Hash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in &self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
+}
+
+// ── AddressHash (16-byte truncated hash) ─────────────────────────────
+
+/// A 16-byte truncated address hash, API-compatible with beetchat
+/// `reticulum::hash::AddressHash`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Hash)]
+pub struct AddressHash([u8; ADDRESS_HASH_SIZE]);
+
+impl AddressHash {
+    pub const fn new(bytes: [u8; ADDRESS_HASH_SIZE]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn new_empty() -> Self {
+        Self([0u8; ADDRESS_HASH_SIZE])
+    }
+
+    pub fn new_from_slice(data: &[u8]) -> Self {
+        let full = reticulum_core::crypto::full_hash(data);
+        let mut truncated = [0u8; ADDRESS_HASH_SIZE];
+        truncated.copy_from_slice(&full[..ADDRESS_HASH_SIZE]);
+        Self(truncated)
+    }
+
+    pub fn new_from_hash(hash: &Hash) -> Self {
+        let mut truncated = [0u8; ADDRESS_HASH_SIZE];
+        truncated.copy_from_slice(&hash.0[..ADDRESS_HASH_SIZE]);
+        Self(truncated)
+    }
+
+    pub fn new_from_hex_string(hex_string: &str) -> Result<Self, RnsError> {
+        if hex_string.len() < ADDRESS_HASH_SIZE * 2 {
+            return Err(RnsError::IncorrectHash);
+        }
+        let mut bytes = [0u8; ADDRESS_HASH_SIZE];
+        for i in 0..ADDRESS_HASH_SIZE {
+            bytes[i] = u8::from_str_radix(&hex_string[i * 2..(i * 2) + 2], 16)
+                .map_err(|_| RnsError::IncorrectHash)?;
+        }
+        Ok(Self(bytes))
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub const fn len(&self) -> usize {
+        ADDRESS_HASH_SIZE
+    }
+
+    pub fn to_hex_string(&self) -> String {
+        let mut s = String::with_capacity(ADDRESS_HASH_SIZE * 2);
+        for byte in &self.0 {
+            use fmt::Write;
+            write!(&mut s, "{:02x}", byte).unwrap();
+        }
+        s
+    }
+}
+
+impl From<Hash> for AddressHash {
+    fn from(hash: Hash) -> Self {
+        Self::new_from_hash(&hash)
+    }
+}
+
+impl fmt::Display for AddressHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "/")?;
+        for byte in &self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        write!(f, "/")
+    }
+}
+
+// ── Identity (public-only) ───────────────────────────────────────────
+
+/// Public-only identity wrapper.  Mirrors beetchat `reticulum::identity::Identity`.
+#[derive(Clone)]
+pub struct Identity {
+    inner: reticulum_core::Identity,
+}
+
+impl Identity {
+    pub fn from_leviculum(inner: reticulum_core::Identity) -> Self {
+        Self { inner }
+    }
+
+    pub fn inner(&self) -> &reticulum_core::Identity {
+        &self.inner
+    }
+
+    /// Verify `signature` over `data`.
+    pub fn verify(
+        &self,
+        data: &[u8],
+        signature: &ed25519_dalek::Signature,
+    ) -> Result<(), RnsError> {
+        let sig_bytes = signature.to_bytes();
+        match self.inner.verify(data, &sig_bytes) {
+            Ok(true) => Ok(()),
+            _ => Err(RnsError::IncorrectSignature),
+        }
+    }
+
+    /// Get the 16-byte identity/address hash.
+    pub fn address_hash(&self) -> AddressHash {
+        AddressHash::new(*self.inner.hash())
+    }
+}
+
+// ── PrivateIdentity (has signing keys) ───────────────────────────────
+
+/// Identity with private keys.  Mirrors beetchat `reticulum::identity::PrivateIdentity`.
+#[derive(Clone)]
+pub struct PrivateIdentity {
+    inner: reticulum_core::Identity,
+}
+
+impl PrivateIdentity {
+    pub fn from_leviculum(inner: reticulum_core::Identity) -> Self {
+        assert!(inner.has_private_keys(), "PrivateIdentity requires private keys");
+        Self { inner }
+    }
+
+    /// Deterministic identity derived from a name (matches beetchat `new_from_name`).
+    pub fn new_from_name(name: &str) -> Self {
+        // beetchat derives keys deterministically: SHA-256(name) → seed → keys
+        let seed = reticulum_core::crypto::full_hash(name.as_bytes());
+        // Use the hash as the private key material (32 bytes X25519 + 32 bytes Ed25519).
+        // beetchat uses `deterministic::deterministic_rng(name)` which produces the same
+        // sequence.  We replicate by using the hash as both key seeds.
+        let mut key_bytes = [0u8; 64];
+        key_bytes[..32].copy_from_slice(&seed);
+        // For the Ed25519 half, hash again to get a different 32 bytes
+        let ed_seed = reticulum_core::crypto::full_hash(&seed);
+        key_bytes[32..].copy_from_slice(&ed_seed);
+
+        // Actually, beetchat uses a deterministic RNG seeded from name bytes.
+        // Let's replicate exactly: seed a ChaCha12Rng from the hash and use
+        // Identity::generate.
+        use rand_chacha::ChaCha12Rng;
+        use rand_core::SeedableRng;
+        let mut rng = ChaCha12Rng::from_seed(seed);
+        let identity = reticulum_core::Identity::generate(&mut rng);
+        Self { inner: identity }
+    }
+
+    /// Random identity.
+    pub fn new_from_rand<R: rand_core::CryptoRngCore>(rng: &mut R) -> Self {
+        Self {
+            inner: reticulum_core::Identity::generate(rng),
+        }
+    }
+
+    /// Get the public-only view.
+    pub fn as_identity(&self) -> Identity {
+        // Create a public-only copy
+        let pub_bytes = self.inner.public_key_bytes();
+        let pub_identity = reticulum_core::Identity::from_public_key_bytes(&pub_bytes)
+            .expect("public key bytes should be valid");
+        Identity { inner: pub_identity }
+    }
+
+    /// Sign `data` and return an ed25519_dalek `Signature`.
+    pub fn sign(&self, data: &[u8]) -> ed25519_dalek::Signature {
+        let sig_bytes = self.inner.sign(data).expect("signing should succeed with private keys");
+        ed25519_dalek::Signature::from_bytes(&sig_bytes)
+    }
+
+    pub fn verify(
+        &self,
+        data: &[u8],
+        signature: &ed25519_dalek::Signature,
+    ) -> Result<(), RnsError> {
+        let sig_bytes = signature.to_bytes();
+        match self.inner.verify(data, &sig_bytes) {
+            Ok(true) => Ok(()),
+            _ => Err(RnsError::IncorrectSignature),
+        }
+    }
+
+    /// Get the underlying leviculum Identity.
+    pub fn inner(&self) -> &reticulum_core::Identity {
+        &self.inner
+    }
+}
+
+// ── DestinationName ──────────────────────────────────────────────────
+
+/// Simple (app_name, aspects) pair, mirrors beetchat `DestinationName`.
+#[derive(Debug, Clone)]
+pub struct DestinationName {
+    pub app_name: String,
+    pub aspects: String,
+}
+
+impl DestinationName {
+    pub fn new(app_name: &str, aspects: &str) -> Self {
+        Self {
+            app_name: app_name.to_string(),
+            aspects: aspects.to_string(),
+        }
+    }
+
+    /// Full dot-separated name (e.g. "lxmf.delivery").
+    pub fn full_name(&self) -> String {
+        format!("{}.{}", self.app_name, self.aspects)
+    }
+}
+
+// ── Destination descriptors ──────────────────────────────────────────
+
+/// Mirrors the `desc` sub-struct that beetchat destinations expose.
+pub struct DestinationDesc {
+    pub address_hash: AddressHash,
+}
+
+/// Mirrors beetchat `SingleInputDestination` (private identity + destination name).
+pub struct SingleInputDestination {
+    pub identity: PrivateIdentity,
+    pub name: DestinationName,
+    pub desc: DestinationDesc,
+}
+
+impl SingleInputDestination {
+    pub fn new(identity: PrivateIdentity, name: DestinationName) -> Self {
+        let address_hash = compute_destination_hash(&identity.as_identity(), &name);
+        Self {
+            identity,
+            name,
+            desc: DestinationDesc { address_hash },
+        }
+    }
+
+    /// Stub for announce — will be implemented when transport integration lands.
+    pub fn announce<R: rand_core::CryptoRngCore + Copy>(
+        &mut self,
+        _rng: R,
+        _app_data: Option<&[u8]>,
+    ) -> Result<Vec<u8>, RnsError> {
+        // TODO: Implement announce packet generation via leviculum transport
+        Err(RnsError::NotImplemented)
+    }
+}
+
+/// Mirrors beetchat `SingleOutputDestination` (public identity + destination name).
+pub struct SingleOutputDestination {
+    pub identity: Identity,
+    pub name: DestinationName,
+    pub desc: DestinationDesc,
+}
+
+impl SingleOutputDestination {
+    pub fn new(identity: Identity, name: DestinationName) -> Self {
+        let address_hash = compute_destination_hash(&identity, &name);
+        Self {
+            identity,
+            name,
+            desc: DestinationDesc { address_hash },
+        }
+    }
+
+    /// Return the destination type.  For Single destinations this is always
+    /// `DestinationType::Single`.
+    pub fn destination_type(&self) -> DestinationType {
+        DestinationType::Single
+    }
+}
+
+/// Compute the destination hash the same way as beetchat:
+/// `truncated_hash(full_hash(name_hash + identity_hash))` where
+/// `name_hash = full_hash(app_name.aspects)` and
+/// `identity_hash` is the 16-byte identity hash.
+fn compute_destination_hash(identity: &Identity, name: &DestinationName) -> AddressHash {
+    let full_name = name.full_name();
+    let name_hash = reticulum_core::crypto::full_hash(full_name.as_bytes());
+    let identity_hash = identity.inner().hash();
+
+    let mut material = Vec::with_capacity(32 + 16);
+    material.extend_from_slice(&name_hash);
+    material.extend_from_slice(identity_hash);
+    let full = reticulum_core::crypto::full_hash(&material);
+    let mut truncated = [0u8; ADDRESS_HASH_SIZE];
+    truncated.copy_from_slice(&full[..ADDRESS_HASH_SIZE]);
+    AddressHash::new(truncated)
+}
+
+// ── DestinationType ──────────────────────────────────────────────────
+
+/// Re-export of destination types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationType {
+    Single = 0x00,
+    Group = 0x01,
+    Plain = 0x02,
+    Link = 0x03,
+}
+
+// ── PacketContext (stub) ─────────────────────────────────────────────
+
+/// Stub for beetchat `reticulum::packet::PacketContext`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketContext {
+    None,
+    Resource,
+    ResourceAdv,
+    ResourceReq,
+    ResourceHmu,
+    ResourceIcl,
+    ResourceRcl,
+    Channel,
+    Keepalive,
+    LinkIdentify,
+    LinkClose,
+    LinkProof,
+    LinkRtt,
+    RequestProof,
+    Lxmf,
+}
+
+// ── HKDF ─────────────────────────────────────────────────────────────
+
+/// HKDF wrapper matching beetchat's API and salt semantics.
+///
+/// When salt is `None` or empty, beetchat uses a 32-byte zero salt.
+/// Leviculum's `derive_key` with `None` salt lets the hkdf crate use
+/// a zero-filled salt of hash-length (32 for SHA-256), which is
+/// equivalent.  We explicitly replicate beetchat's behavior.
+pub fn hkdf(
+    length: usize,
+    derive_from: &[u8],
+    salt: Option<&[u8]>,
+    context: Option<&[u8]>,
+) -> Vec<u8> {
+    const HASH_LEN: usize = 32;
+
+    // Match beetchat: empty or missing salt → 32 zero bytes
+    let effective_salt: Option<&[u8]> = match salt {
+        Some(s) if !s.is_empty() => Some(s),
+        _ => Some(&[0u8; HASH_LEN]),
+    };
+
+    let mut output = vec![0u8; length];
+    reticulum_core::crypto::derive_key(derive_from, effective_salt, context, &mut output);
+    output
+}
+
+// ── RnsError ─────────────────────────────────────────────────────────
+
+/// Simple error enum matching the beetchat errors LXMF actually uses.
+#[derive(Debug)]
+pub enum RnsError {
+    IncorrectHash,
+    IncorrectSignature,
+    CryptoError,
+    NotImplemented,
+    Transport(String),
+}
+
+impl fmt::Display for RnsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RnsError::IncorrectHash => write!(f, "Incorrect hash"),
+            RnsError::IncorrectSignature => write!(f, "Incorrect signature"),
+            RnsError::CryptoError => write!(f, "Crypto error"),
+            RnsError::NotImplemented => write!(f, "Not implemented"),
+            RnsError::Transport(msg) => write!(f, "Transport error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for RnsError {}
+
+// ── Transport (stub) ─────────────────────────────────────────────────
+
+/// Stub for beetchat `reticulum::transport::Transport`.
+///
+/// Will be replaced with leviculum `ReticulumNode` integration in the next
+/// phase.  For now, only the methods actually called from the router are
+/// stubbed.
+pub struct Transport {
+    // TODO: wrap reticulum_std::ReticulumNode when transport integration lands
+}
+
+impl Transport {
+    pub fn new(_config: TransportConfig) -> Self {
+        Self {}
+    }
+
+    pub async fn has_path(&self, _destination: &AddressHash) -> bool {
+        // TODO: implement via leviculum
+        false
+    }
+
+    pub async fn request_path(&self, _destination: &AddressHash, _tag: Option<u64>) {
+        // TODO: implement via leviculum
+    }
+
+    pub async fn send_to_destination(
+        &self,
+        _destination: &AddressHash,
+        _payload: &[u8],
+        _context: PacketContext,
+    ) -> Result<(), RnsError> {
+        // TODO: implement via leviculum
+        Err(RnsError::NotImplemented)
+    }
+
+    pub async fn recall_identity(
+        &self,
+        _destination: &AddressHash,
+        _request: bool,
+    ) -> Option<Identity> {
+        // TODO: implement via leviculum
+        None
+    }
+
+    pub async fn send_direct(&self, _iface: usize, _data: Vec<u8>) {
+        // TODO: implement via leviculum
+    }
+
+    pub async fn register_announce_handler<H: AnnounceHandler + Send + Sync + 'static>(
+        &self,
+        _handler: H,
+    ) {
+        // TODO: implement via leviculum
+    }
+
+    pub fn iface_manager(&self) -> std::sync::Arc<tokio::sync::Mutex<IfaceManagerStub>> {
+        std::sync::Arc::new(tokio::sync::Mutex::new(IfaceManagerStub))
+    }
+}
+
+/// Stub transport config.
+pub struct TransportConfig;
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self
+    }
+}
+
+/// Stub iface manager.
+pub struct IfaceManagerStub;
+
+impl IfaceManagerStub {
+    pub fn spawn<I, F>(&self, _iface: I, _spawner: F) -> usize
+    where
+        F: FnOnce(I) -> usize,
+    {
+        0
+    }
+}
+
+// ── AnnounceHandler trait (stub) ─────────────────────────────────────
+
+/// Stub trait matching beetchat's `AnnounceHandler`.
+pub trait AnnounceHandler: Send + Sync {
+    fn handle_announce(
+        &self,
+        destination: std::sync::Arc<tokio::sync::Mutex<SingleOutputDestination>>,
+        app_data: Vec<u8>,
+    );
+
+    fn aspect_filter(&self) -> Option<&str> {
+        None
+    }
+
+    fn receive_path_responses(&self) -> bool {
+        false
+    }
+}
+
+// ── PacketDataBuffer ─────────────────────────────────────────────────
+
+/// Alias matching beetchat's `PacketDataBuffer`.
+pub type PacketDataBuffer = Vec<u8>;

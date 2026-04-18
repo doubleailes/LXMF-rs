@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-use reticulum::error::RnsError;
+use crate::compat::RnsError;
 
 /// Router-level errors.
 #[derive(Debug)]

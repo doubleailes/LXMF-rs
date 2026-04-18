@@ -1,10 +1,9 @@
+use LXMF_rs::compat::{
+    AddressHash, DestinationName, PrivateIdentity, SingleInputDestination,
+    SingleOutputDestination, Transport, TransportConfig,
+};
 use LXMF_rs::{LXMessage, LxmRouter, RouterConfig, ValidMethod};
 use rand_core::OsRng;
-use reticulum::destination::{DestinationName, SingleInputDestination, SingleOutputDestination};
-use reticulum::hash::AddressHash;
-use reticulum::identity::PrivateIdentity;
-use reticulum::iface::tcp_client::TcpClient;
-use reticulum::transport::{Transport, TransportConfig};
 use std::{env, sync::Arc};
 
 const APP_NAME: &str = "lxmf";
@@ -74,99 +73,58 @@ async fn main() {
 
     let transport = Arc::new(Transport::new(TransportConfig::default()));
 
-    // attach_transport() automatically registers LXMF announce handlers that
-    // cache stamp costs from incoming announces. The router's prepare_outbound_message()
-    // will automatically apply these cached stamp costs to outbound messages.
+    // TODO: attach_transport() needs to be updated for leviculum transport
+    // For now, transport integration is stubbed
     if let Err(err) = router.attach_transport(transport.clone()).await {
         log::error!("Failed to attach transport to router: {}", err);
         return;
     }
 
-    // Spawn the network interface
-    let client_addr = transport.iface_manager().lock().await.spawn(
-        TcpClient::new("amsterdam.connect.reticulum.network:4965"),
-        TcpClient::spawn,
-    );
+    // TODO: Spawn network interface via leviculum
+    // let client_addr = transport.iface_manager().lock().await.spawn(
+    //     TcpClient::new("amsterdam.connect.reticulum.network:4965"),
+    //     TcpClient::spawn,
+    // );
 
     log::info!("Waiting for path to destination {}...", destination_hash);
 
-    // Wait for path to destination (announce will be received and stamp cost cached automatically)
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // TODO: Transport integration — this loop needs leviculum's path discovery
+    // For now, demonstrate message creation without sending
+    log::warn!("Transport integration not yet complete — creating message for demonstration");
 
-        if transport.has_path(&destination_hash).await {
-            log::info!("Path found to {}", destination_hash);
+    // Create a dummy destination identity for demonstration
+    let mut demo_rng = OsRng;
+    let receiver_identity = PrivateIdentity::new_from_rand(&mut demo_rng);
 
-            // Small delay to ensure announce handler has processed the stamp cost
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let destination = SingleOutputDestination::new(
+        receiver_identity.as_identity(),
+        DestinationName::new(APP_NAME, DELIVERY_ASPECT),
+    );
+    let source_destination = SingleInputDestination::new(
+        private_identity.clone(),
+        DestinationName::new(APP_NAME, DELIVERY_ASPECT),
+    );
 
-            let destination_identity =
-                match transport.recall_identity(&destination_hash, false).await {
-                    Some(identity) => identity,
-                    None => {
-                        log::error!(
-                            "Transport does not know the destination identity for {}",
-                            destination_hash
-                        );
-                        return;
-                    }
-                };
+    // Create the LXMF message
+    let message = LXMessage::new(
+        destination,
+        source_destination,
+        "Hello, this is the content of the message.".to_string(),
+        "Greetings".to_string(),
+        None,
+        desired_method,
+        true,
+    );
 
-            let destination = SingleOutputDestination::new(
-                destination_identity,
-                DestinationName::new(APP_NAME, DELIVERY_ASPECT),
-            );
-            let mut source_destination = SingleInputDestination::new(
-                private_identity.clone(),
-                DestinationName::new(APP_NAME, DELIVERY_ASPECT),
-            );
+    router.enqueue_outbound(message);
+    log::info!(
+        "Queued LXMF message targeting destination hash {}",
+        hex::encode(destination_hash.as_slice())
+    );
 
-            // Announce ourselves
-            transport
-                .send_direct(
-                    client_addr,
-                    source_destination.announce(OsRng, None).unwrap(),
-                )
-                .await;
-
-            // Create the LXMF message
-            let message = LXMessage::new(
-                destination,
-                source_destination,
-                "Hello, this is the content of the message.".to_string(),
-                "Greetings".to_string(),
-                None,
-                desired_method,
-                true,
-            );
-
-            // The router's prepare_outbound_message() will auto-apply stamp cost from its cache
-            // and generate the stamp work as needed.
-
-            // Queue and send the message
-            // The router's prepare_outbound_message() will:
-            // 1. Auto-apply stamp cost from its cache (if not already set)
-            // 2. Generate the stamp work
-            // 3. Pack and send the message
-            router.enqueue_outbound(message);
-            log::info!(
-                "Queued LXMF message targeting destination hash {}",
-                destination_hash
-            );
-
-            if let Err(err) = router.flush_outbound_blocking() {
-                log::error!("Failed to flush outbound LXMF queue: {}", err);
-                return;
-            }
-            log::info!("Outbound queue flushed. Message handed to transport.");
-            break;
-        } else {
-            transport.request_path(&destination_hash, None).await;
-            log::info!(
-                "Requested path for {}. Waiting for announce...",
-                destination_hash
-            );
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-        }
+    if let Err(err) = router.flush_outbound_blocking() {
+        log::error!("Failed to flush outbound LXMF queue: {}", err);
+        return;
     }
+    log::info!("Outbound queue flushed.");
 }
