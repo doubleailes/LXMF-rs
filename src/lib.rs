@@ -1,6 +1,6 @@
 pub mod compat;
-pub mod transport;
 mod message;
+pub mod transport;
 pub use message::{LXMessage, ValidMethod};
 mod peer;
 pub use peer::{LxmPeer, PeerError, PeerMetadata, SyncStrategy};

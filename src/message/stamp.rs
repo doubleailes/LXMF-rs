@@ -2,7 +2,7 @@ use rand_core::{CryptoRng, RngCore};
 use sha2::Digest;
 use thiserror::Error;
 
-use crate::compat::{hkdf, Hash, HASH_SIZE};
+use crate::compat::{HASH_SIZE, Hash, hkdf};
 
 const HASH_BITS: u16 = (HASH_SIZE * 8) as u16;
 const HKDF_BLOCK_SIZE: usize = 256;

@@ -13,11 +13,11 @@
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 
 use LXMF_rs::compat::{
-    AddressHash, DestinationName, PrivateIdentity, SingleInputDestination,
-    SingleOutputDestination, Identity as CompatIdentity,
+    AddressHash, DestinationName, Identity as CompatIdentity, PrivateIdentity,
+    SingleInputDestination, SingleOutputDestination,
 };
-use LXMF_rs::{LXMessage, LxmRouter, RouterConfig, ValidMethod};
 use LXMF_rs::transport::LxmfTransport;
+use LXMF_rs::{LXMessage, LxmRouter, RouterConfig, ValidMethod};
 use rand_core::OsRng;
 
 use reticulum_core::{Destination, DestinationType, Direction, Identity};
@@ -32,16 +32,23 @@ async fn main() {
 
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <dest_hash_hex> [--port PORT] [--size BYTES]", args[0]);
+        eprintln!(
+            "Usage: {} <dest_hash_hex> [--port PORT] [--size BYTES]",
+            args[0]
+        );
         return;
     }
 
     let dest_hex = &args[1];
-    let port: u16 = args.iter().position(|a| a == "--port")
+    let port: u16 = args
+        .iter()
+        .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|p| p.parse().ok())
         .unwrap_or(14967);
-    let content_size: usize = args.iter().position(|a| a == "--size")
+    let content_size: usize = args
+        .iter()
+        .position(|a| a == "--size")
         .and_then(|i| args.get(i + 1))
         .and_then(|p| p.parse().ok())
         .unwrap_or(10_000);
@@ -79,7 +86,8 @@ async fn main() {
         DestinationType::Single,
         APP_NAME,
         &[DELIVERY_ASPECT],
-    ).expect("failed to create destination");
+    )
+    .expect("failed to create destination");
     let our_dest_hash = *our_dest.hash();
     transport.register_destination(our_dest).await;
 
@@ -91,22 +99,32 @@ async fn main() {
     let router = LxmRouter::new(config).expect("failed to create router");
 
     // Register delivery identity
-    let _local_dest = router.register_delivery_identity(
-        Some(our_private.clone()),
-        Some("LXMF-rs Router Test".to_string()),
-        None,
-    ).expect("failed to register delivery identity");
+    let _local_dest = router
+        .register_delivery_identity(
+            Some(our_private.clone()),
+            Some("LXMF-rs Router Test".to_string()),
+            None,
+        )
+        .expect("failed to register delivery identity");
 
     // Attach transport to router
-    router.attach_transport(transport.clone()).await.expect("failed to attach transport");
+    router
+        .attach_transport(transport.clone())
+        .await
+        .expect("failed to attach transport");
 
     // Announce ourselves
-    transport.announce_destination(&our_dest_hash, Some(b"LXMF-rs Router Delivery Test"))
-        .await.expect("announce failed");
+    transport
+        .announce_destination(&our_dest_hash, Some(b"LXMF-rs Router Delivery Test"))
+        .await
+        .expect("announce failed");
 
     // Request path and wait
     let target_dh = target_hash.to_destination_hash();
-    transport.request_path(&target_dh).await.expect("path request failed");
+    transport
+        .request_path(&target_dh)
+        .await
+        .expect("path request failed");
     log::info!("Requested path to {}", dest_hex);
 
     // Wait for path
@@ -155,7 +173,8 @@ async fn main() {
     );
 
     let message = LXMessage::new(
-        dest_out, src_in,
+        dest_out,
+        src_in,
         large_content.to_string(),
         "Router Delivery Test".to_string(),
         None,
@@ -173,7 +192,10 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(20)).await;
 
     log::info!("══════════════════════════════════════════════════════");
-    log::info!("  Router delivery test complete for {} byte message", content_size);
+    log::info!(
+        "  Router delivery test complete for {} byte message",
+        content_size
+    );
     log::info!("══════════════════════════════════════════════════════");
 
     // Graceful shutdown

@@ -12,8 +12,7 @@
 use std::{env, net::SocketAddr, time::Duration};
 
 use LXMF_rs::compat::{
-    AddressHash, DestinationName, PrivateIdentity, SingleInputDestination,
-    SingleOutputDestination,
+    AddressHash, DestinationName, PrivateIdentity, SingleInputDestination, SingleOutputDestination,
 };
 use LXMF_rs::{LXMessage, ValidMethod};
 use rand_core::OsRng;
@@ -90,7 +89,9 @@ async fn main() {
 
     // Request path to target
     let target_dh = target_hash.to_destination_hash();
-    node.request_path(&target_dh).await.expect("path request failed");
+    node.request_path(&target_dh)
+        .await
+        .expect("path request failed");
     log::info!("Requested path to {}", dest_hex);
 
     // Wait for path
@@ -111,7 +112,11 @@ async fn main() {
                         }
                     }
                 }
-                Some(NodeEvent::PathFound { destination_hash, hops, .. }) => {
+                Some(NodeEvent::PathFound {
+                    destination_hash,
+                    hops,
+                    ..
+                }) => {
                     log::info!("Path found: {:?} ({} hops)", destination_hash, hops);
                     if destination_hash == target_dh {
                         return true;
@@ -145,8 +150,7 @@ async fn main() {
     };
 
     // Build LXMF message
-    let target_pub_identity =
-        LXMF_rs::compat::Identity::from_leviculum(target_identity.clone());
+    let target_pub_identity = LXMF_rs::compat::Identity::from_leviculum(target_identity.clone());
     let dest_out = SingleOutputDestination::new(
         target_pub_identity,
         DestinationName::new(APP_NAME, DELIVERY_ASPECT),
@@ -189,10 +193,7 @@ async fn main() {
     // Send via single packet (small message, fits in one packet)
     match node.send_single_packet(&target_dh, &payload).await {
         Ok(packet_hash) => {
-            log::info!(
-                "Message sent! Packet hash: {}",
-                hex::encode(&packet_hash)
-            );
+            log::info!("Message sent! Packet hash: {}", hex::encode(&packet_hash));
         }
         Err(e) => {
             log::error!("Failed to send packet: {}", e);

@@ -9,12 +9,12 @@
 
 use std::net::SocketAddr;
 
-use reticulum_core::{Destination, DestinationHash, Identity, LinkId};
 use reticulum_core::node::NodeEvent;
 use reticulum_core::resource::ResourceStrategy;
+use reticulum_core::{Destination, DestinationHash, Identity, LinkId};
 use reticulum_std::driver::{LinkHandle, ReticulumNode, ReticulumNodeBuilder};
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 use crate::compat::RnsError;
 
@@ -39,10 +39,7 @@ impl LxmfTransport {
     }
 
     /// Build a transport with a single TCP client interface and start it.
-    pub async fn with_tcp_client(
-        identity: Identity,
-        addr: SocketAddr,
-    ) -> Result<Self, RnsError> {
+    pub async fn with_tcp_client(identity: Identity, addr: SocketAddr) -> Result<Self, RnsError> {
         let node = ReticulumNodeBuilder::new()
             .identity(identity)
             .add_tcp_client(addr)

@@ -14,8 +14,8 @@
 use std::{env, net::SocketAddr, time::Duration};
 
 use LXMF_rs::compat::{
-    AddressHash, DestinationName, PrivateIdentity, SingleInputDestination,
-    SingleOutputDestination, Identity as CompatIdentity,
+    AddressHash, DestinationName, Identity as CompatIdentity, PrivateIdentity,
+    SingleInputDestination, SingleOutputDestination,
 };
 use LXMF_rs::{LXMessage, ValidMethod};
 use rand_core::OsRng;
@@ -34,16 +34,23 @@ async fn main() {
 
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <dest_hash_hex> [--port PORT] [--size BYTES]", args[0]);
+        eprintln!(
+            "Usage: {} <dest_hash_hex> [--port PORT] [--size BYTES]",
+            args[0]
+        );
         return;
     }
 
     let dest_hex = &args[1];
-    let port: u16 = args.iter().position(|a| a == "--port")
+    let port: u16 = args
+        .iter()
+        .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|p| p.parse().ok())
         .unwrap_or(14966);
-    let content_size: usize = args.iter().position(|a| a == "--size")
+    let content_size: usize = args
+        .iter()
+        .position(|a| a == "--size")
         .and_then(|i| args.get(i + 1))
         .and_then(|p| p.parse().ok())
         .unwrap_or(10_000);
@@ -80,17 +87,21 @@ async fn main() {
         DestinationType::Single,
         APP_NAME,
         &[DELIVERY_ASPECT],
-    ).expect("failed to create destination");
+    )
+    .expect("failed to create destination");
     let our_dest_hash = *our_dest.hash();
     node.register_destination(our_dest);
 
     // Announce
     node.announce_destination(&our_dest_hash, Some(b"LXMF-rs Resource Test"))
-        .await.expect("announce failed");
+        .await
+        .expect("announce failed");
 
     // Request path
     let target_dh = target_hash.to_destination_hash();
-    node.request_path(&target_dh).await.expect("path request failed");
+    node.request_path(&target_dh)
+        .await
+        .expect("path request failed");
     log::info!("Requested path to {}", dest_hex);
 
     // Wait for path + identity
@@ -100,20 +111,29 @@ async fn main() {
                 return true;
             }
             match event_rx.recv().await {
-                Some(NodeEvent::PathFound { destination_hash, hops, .. }) => {
+                Some(NodeEvent::PathFound {
+                    destination_hash,
+                    hops,
+                    ..
+                }) => {
                     log::info!("Path found: {:?} ({} hops)", destination_hash, hops);
-                    if destination_hash == target_dh { return true; }
+                    if destination_hash == target_dh {
+                        return true;
+                    }
                 }
                 Some(NodeEvent::AnnounceReceived { announce, .. }) => {
                     log::info!("Announce from {:?}", announce.destination_hash());
                     tokio::time::sleep(Duration::from_millis(200)).await;
-                    if node.has_path(&target_dh) { return true; }
+                    if node.has_path(&target_dh) {
+                        return true;
+                    }
                 }
                 Some(_) => continue,
                 None => return false,
             }
         }
-    }).await;
+    })
+    .await;
 
     if !matches!(path_found, Ok(true)) {
         log::error!("Path not found within 15s");
@@ -160,7 +180,8 @@ async fn main() {
     );
 
     let mut message = LXMessage::new(
-        dest_out, src_in,
+        dest_out,
+        src_in,
         large_content.to_string(),
         "Resource Transfer Test".to_string(),
         None,
@@ -182,7 +203,11 @@ async fn main() {
     // to LXMessage.unpack_from_bytes() which expects: dest_hash + src_hash + sig + payload
     let payload = packed.clone();
 
-    log::info!("Message packed: {} bytes (content: {} bytes)", payload.len(), content_size);
+    log::info!(
+        "Message packed: {} bytes (content: {} bytes)",
+        payload.len(),
+        content_size
+    );
     log::info!("MDU is 464 bytes — this message REQUIRES Link + Resource transfer");
 
     // ── Step 1: Establish Link ──────────────────────────────────────
@@ -204,13 +229,24 @@ async fn main() {
     let link_established = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             match event_rx.recv().await {
-                Some(NodeEvent::LinkEstablished { link_id: lid, is_initiator }) => {
-                    log::info!("Link established! (initiator: {}, link_id: {:?})", is_initiator, lid);
+                Some(NodeEvent::LinkEstablished {
+                    link_id: lid,
+                    is_initiator,
+                }) => {
+                    log::info!(
+                        "Link established! (initiator: {}, link_id: {:?})",
+                        is_initiator,
+                        lid
+                    );
                     if lid == link_id {
                         return true;
                     }
                 }
-                Some(NodeEvent::LinkClosed { link_id: lid, reason, .. }) => {
+                Some(NodeEvent::LinkClosed {
+                    link_id: lid,
+                    reason,
+                    ..
+                }) => {
                     if lid == link_id {
                         log::error!("Link closed before establishment: {:?}", reason);
                         return false;
@@ -222,7 +258,8 @@ async fn main() {
                 None => return false,
             }
         }
-    }).await;
+    })
+    .await;
 
     if !matches!(link_established, Ok(true)) {
         log::error!("Link establishment timed out or failed");
@@ -249,25 +286,47 @@ async fn main() {
     let transfer_complete = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             match event_rx.recv().await {
-                Some(NodeEvent::ResourceProgress { resource_hash: rh, progress, transfer_size, is_sender, .. }) => {
+                Some(NodeEvent::ResourceProgress {
+                    resource_hash: rh,
+                    progress,
+                    transfer_size,
+                    is_sender,
+                    ..
+                }) => {
                     if rh == resource_hash {
-                        log::info!("Resource progress: {:.1}% ({} bytes, sender: {})",
-                            progress * 100.0, transfer_size, is_sender);
+                        log::info!(
+                            "Resource progress: {:.1}% ({} bytes, sender: {})",
+                            progress * 100.0,
+                            transfer_size,
+                            is_sender
+                        );
                     }
                 }
-                Some(NodeEvent::ResourceCompleted { resource_hash: rh, is_sender, .. }) => {
+                Some(NodeEvent::ResourceCompleted {
+                    resource_hash: rh,
+                    is_sender,
+                    ..
+                }) => {
                     if rh == resource_hash {
                         log::info!("Resource transfer COMPLETE! (sender: {})", is_sender);
                         return true;
                     }
                 }
-                Some(NodeEvent::ResourceFailed { resource_hash: rh, error, .. }) => {
+                Some(NodeEvent::ResourceFailed {
+                    resource_hash: rh,
+                    error,
+                    ..
+                }) => {
                     if rh == resource_hash {
                         log::error!("Resource transfer FAILED: {:?}", error);
                         return false;
                     }
                 }
-                Some(NodeEvent::LinkClosed { link_id: lid, reason, .. }) => {
+                Some(NodeEvent::LinkClosed {
+                    link_id: lid,
+                    reason,
+                    ..
+                }) => {
                     if lid == link_id {
                         log::warn!("Link closed during transfer: {:?}", reason);
                         return false;
@@ -277,12 +336,16 @@ async fn main() {
                 None => return false,
             }
         }
-    }).await;
+    })
+    .await;
 
     match transfer_complete {
         Ok(true) => {
             log::info!("══════════════════════════════════════════════════════");
-            log::info!("  SUCCESS: {} byte LXMF message delivered via", payload.len());
+            log::info!(
+                "  SUCCESS: {} byte LXMF message delivered via",
+                payload.len()
+            );
             log::info!("  Link + Resource transfer (Rust → Python)");
             log::info!("══════════════════════════════════════════════════════");
         }
